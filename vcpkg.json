@@ -1,0 +1,15 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "clangsql",
+    "version": "0.1.0",
+    "description": "SQL interface for Clang AST databases",
+    "homepage": "https://github.com/0xeb/clangsql",
+    "license": "MIT",
+    "dependencies": [
+        {
+            "name": "llvm",
+            "default-features": false,
+            "features": ["clang", "enable-rtti"]
+        }
+    ]
+}

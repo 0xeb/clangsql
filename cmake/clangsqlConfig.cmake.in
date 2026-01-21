@@ -1,0 +1,39 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Dependencies
+find_dependency(xsql)
+
+# libclang - try vcpkg first, then manual search
+find_package(Clang CONFIG QUIET)
+if(NOT Clang_FOUND)
+    find_library(LIBCLANG_LIBRARY NAMES clang libclang
+        HINTS
+            "$ENV{LLVM_DIR}/lib"
+            "$ENV{LLVM_ROOT}/lib"
+            "/usr/lib/llvm-18/lib"
+            "/usr/lib/llvm-17/lib"
+            "/usr/lib/llvm-16/lib"
+            "/opt/homebrew/opt/llvm/lib"
+            "C:/Program Files/LLVM/lib"
+    )
+    find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
+        HINTS
+            "$ENV{LLVM_DIR}/include"
+            "$ENV{LLVM_ROOT}/include"
+            "/usr/lib/llvm-18/include"
+            "/usr/lib/llvm-17/include"
+            "/usr/lib/llvm-16/include"
+            "/opt/homebrew/opt/llvm/include"
+            "C:/Program Files/LLVM/include"
+    )
+    if(NOT LIBCLANG_LIBRARY OR NOT LIBCLANG_INCLUDE_DIR)
+        message(FATAL_ERROR "libclang not found. Set LLVM_DIR or LLVM_ROOT.")
+    endif()
+endif()
+
+# Include targets
+include("${CMAKE_CURRENT_LIST_DIR}/clangsqlTargets.cmake")
+
+check_required_components(clangsql)
