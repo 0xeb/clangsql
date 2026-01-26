@@ -37,10 +37,21 @@ void signal_handler(int signum) {
 }
 #endif
 
-void print_usage(const char* program) {
+/// Extract just the program name from a path (handles both / and \)
+std::string program_name(const char* path) {
+    std::string p(path);
+    auto pos = p.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        return p.substr(pos + 1);
+    }
+    return p;
+}
+
+void print_usage(const char* argv0) {
+    std::string prog = program_name(argv0);
     std::cerr << "Usage:\n"
-              << "  " << program << " <files...> [options] [clang-args...]\n"
-              << "  " << program << " --remote host:port [options]\n"
+              << "  " << prog << " <files...> [options] [clang-args...]\n"
+              << "  " << prog << " --remote host:port [options]\n"
               << "\n"
               << "Local Options:\n"
               << "  -e <sql>           Execute SQL query and exit\n"
@@ -81,14 +92,14 @@ void print_usage(const char* program) {
               << "  [schema_]calls, [schema_]inheritance\n"
               << "\n"
               << "Examples:\n"
-              << "  " << program << " main.cpp -e \"SELECT name FROM functions\"\n"
+              << "  " << prog << " main.cpp -e \"SELECT name FROM functions\"\n"
 #ifdef CLANGSQL_HAS_AI_AGENT
-              << "  " << program << " main.cpp --agent -i\n"
-              << "  " << program << " main.cpp --prompt \"Find all virtual methods\"\n"
+              << "  " << prog << " main.cpp --agent -i\n"
+              << "  " << prog << " main.cpp --prompt \"Find all virtual methods\"\n"
 #endif
-              << "  " << program << " main.cpp --server\n"
-              << "  " << program << " --remote localhost:" << clangsql::DEFAULT_PORT << " -q \"SELECT * FROM functions\"\n"
-              << "  " << program << " --remote localhost:" << clangsql::DEFAULT_PORT << " -i\n";
+              << "  " << prog << " main.cpp --server\n"
+              << "  " << prog << " --remote localhost:" << clangsql::DEFAULT_PORT << " -q \"SELECT * FROM functions\"\n"
+              << "  " << prog << " --remote localhost:" << clangsql::DEFAULT_PORT << " -i\n";
 }
 
 /// Check if argument looks like a source file
