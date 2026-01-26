@@ -23,6 +23,16 @@ clangsql main.cpp -- -std=c++17 -I./include
 
 # Interactive mode
 clangsql main.cpp -i
+
+# Multi-file with schema prefixes (each file gets prefixed tables)
+clangsql lib/utils.cpp:utils src/main.cpp:main -i
+
+# Glob patterns for multiple files
+clangsql "src/**/*.cpp" -- -std=c++17 -I./include
+
+# CMake project (uses compile_commands.json)
+clangsql --compile-commands build/compile_commands.json -i
+clangsql --build-dir build -i  # Auto-find compile_commands.json
 ```
 
 ## Building
@@ -138,23 +148,50 @@ add          | 3
 
 ### Multi-File Analysis
 
+clangsql supports parsing entire projects with multiple translation units. Each file gets a schema prefix, making tables like `utils_functions`, `main_classes`, etc.
+
+**Cross-file queries work via USR (Unified Symbol Resolution)** - a unique identifier consistent across translation units.
+
 ```bash
-# Attach multiple translation units with prefixes
-clangsql "file1.cpp:a" "file2.cpp:b" -i
+# Schema prefix syntax: file.cpp:schema_name
+clangsql lib/utils.cpp:utils src/main.cpp:main -i
+
+# Glob patterns (recursive)
+clangsql "src/**/*.cpp" -- -std=c++17
+
+# CMake projects with compile_commands.json
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+clangsql --compile-commands build/compile_commands.json -i
 ```
+
 ```sql
--- Compare functions across files
-SELECT 'a' as tu, name FROM a_functions WHERE is_system = 0
-UNION ALL
-SELECT 'b', name FROM b_functions WHERE is_system = 0;
+-- Find utils functions that are called from main
+SELECT DISTINCT u.name as function_called
+FROM utils_functions u
+JOIN main_calls c ON c.callee_usr = u.usr
+WHERE u.is_system = 0;
 ```
 ```
-tu | name
----+-------------
-a  | main
-a  | process_data
-b  | multiply
-b  | get_version
+function_called
+---------------
+log_info
+compute_area
+```
+
+```sql
+-- Aggregate function counts across all schemas
+SELECT COUNT(*) as total_functions FROM (
+    SELECT name FROM utils_functions WHERE is_system = 0
+    UNION ALL
+    SELECT name FROM main_functions WHERE is_system = 0
+);
+```
+
+```sql
+-- Cross-file inheritance (class in main inherits from utils)
+SELECT m.derived_name, u.name as base_class
+FROM main_inheritance m
+JOIN utils_classes u ON m.base_usr = u.usr;
 ```
 
 ### Class Layout

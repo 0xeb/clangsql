@@ -3,6 +3,7 @@
 
 #include <clangsql/clangsql.hpp>
 #include <clangsql/session.hpp>
+#include <clangsql/compile_commands.hpp>
 #include <xsql/socket/server.hpp>
 #include <xsql/socket/client.hpp>
 #include <iostream>
@@ -10,7 +11,11 @@
 #include <vector>
 #include <iomanip>
 #include <thread>
+#include <regex>
+#include <set>
 #include <chrono>
+#include <filesystem>
+#include <algorithm>
 
 #ifdef CLANGSQL_HAS_AI_AGENT
 #include "ai_agent.hpp"
@@ -50,6 +55,11 @@ void print_usage(const char* program) {
               << "  --token <token>    Auth token for server mode\n"
               << "  -h, --help         Show this help\n"
               << "  --version          Show version\n"
+              << "\n"
+              << "Project Options:\n"
+              << "  --compile-commands <path>  Load compile_commands.json\n"
+              << "  --build-dir <path>         Load from build directory\n"
+              << "  'src/**/*.cpp'             Glob pattern for source files\n"
               << "\n"
               << "Remote Options:\n"
               << "  --remote host:port Connect to remote server\n"
@@ -119,12 +129,88 @@ bool is_source_file(const std::string& arg) {
     return false;
 }
 
+/// Check if argument looks like a glob pattern
+bool is_glob_pattern(const std::string& arg) {
+    return arg.find('*') != std::string::npos || arg.find('?') != std::string::npos;
+}
+
+/// Expand glob pattern to matching files
+std::vector<std::string> expand_glob(const std::string& pattern) {
+    std::vector<std::string> result;
+
+    // Find the base directory (everything before the first wildcard)
+    size_t first_wild = pattern.find_first_of("*?");
+    if (first_wild == std::string::npos) {
+        result.push_back(pattern);
+        return result;
+    }
+
+    // Find last separator before wildcard
+    size_t last_sep = pattern.find_last_of("/\\", first_wild);
+    std::filesystem::path base_dir = (last_sep == std::string::npos)
+        ? std::filesystem::current_path()
+        : pattern.substr(0, last_sep);
+
+    // Get the pattern part
+    std::string pattern_part = (last_sep == std::string::npos)
+        ? pattern
+        : pattern.substr(last_sep + 1);
+
+    // Convert glob pattern to regex
+    std::string regex_pattern;
+    for (size_t i = 0; i < pattern_part.size(); ++i) {
+        char c = pattern_part[i];
+        if (c == '*') {
+            if (i + 1 < pattern_part.size() && pattern_part[i + 1] == '*') {
+                regex_pattern += ".*";  // ** matches anything including /
+                ++i;
+                if (i + 1 < pattern_part.size() && (pattern_part[i + 1] == '/' || pattern_part[i + 1] == '\\')) {
+                    ++i;  // skip following separator
+                }
+            } else {
+                regex_pattern += "[^/\\\\]*";  // * matches anything except separator
+            }
+        } else if (c == '?') {
+            regex_pattern += "[^/\\\\]";
+        } else if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+                   c == '{' || c == '}' || c == '+' || c == '^' || c == '$' || c == '|') {
+            regex_pattern += "\\";
+            regex_pattern += c;
+        } else {
+            regex_pattern += c;
+        }
+    }
+    regex_pattern += "$";
+
+    try {
+        std::regex re(regex_pattern, std::regex::icase);
+
+        if (std::filesystem::exists(base_dir)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
+                if (entry.is_regular_file()) {
+                    std::string rel_path = std::filesystem::relative(entry.path(), base_dir).string();
+                    std::replace(rel_path.begin(), rel_path.end(), '\\', '/');
+                    if (std::regex_match(rel_path, re)) {
+                        result.push_back(entry.path().string());
+                    }
+                }
+            }
+        }
+    } catch (const std::regex_error&) {
+        result.push_back(pattern);
+    }
+
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 /// Check if argument is a clangsql option (not a Clang arg)
 bool is_clangsql_option(const std::string& arg) {
     return arg == "-e" || arg == "-q" || arg == "-i" ||
            arg == "-h" || arg == "--help" ||
            arg == "--version" || arg == "--server" ||
            arg == "--remote" || arg == "--token" ||
+           arg == "--compile-commands" || arg == "--build-dir" ||
 #ifdef CLANGSQL_HAS_AI_AGENT
            arg == "--agent" || arg == "--prompt" ||
            arg == "--provider" || arg == "-v" ||
@@ -672,6 +758,8 @@ int main(int argc, char* argv[]) {
     bool interactive = false;
     bool server_mode = false;
     bool after_dashdash = false;
+    std::string compile_commands_path;
+    std::string build_dir_path;
 
 #ifdef CLANGSQL_HAS_AI_AGENT
     bool agent_mode = false;
@@ -710,6 +798,10 @@ int main(int argc, char* argv[]) {
             remote_spec = argv[++i];
         } else if (arg == "--token" && i + 1 < argc) {
             auth_token = argv[++i];
+        } else if (arg == "--compile-commands" && i + 1 < argc) {
+            compile_commands_path = argv[++i];
+        } else if (arg == "--build-dir" && i + 1 < argc) {
+            build_dir_path = argv[++i];
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -727,6 +819,14 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-v") {
             agent_verbose = true;
 #endif
+        } else if (is_glob_pattern(arg)) {
+            // Expand glob pattern
+            auto matches = expand_glob(arg);
+            for (const auto& match : matches) {
+                if (is_source_file(match)) {
+                    source_files.push_back({match, schema_from_path(match)});
+                }
+            }
         } else if (is_source_file(arg)) {
             // Parse file:schema syntax
             auto [path, schema] = parse_file_spec(arg);
@@ -762,6 +862,34 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return run_remote_mode(remote_spec, query, auth_token, interactive);
+    }
+
+    //=========================================================================
+    // Load compile_commands.json if specified
+    //=========================================================================
+    clangsql::CompileCommandsDatabase compile_db;
+    if (!compile_commands_path.empty()) {
+        if (!compile_db.load(compile_commands_path)) {
+            std::cerr << "Error: Failed to load " << compile_commands_path << "\n";
+            return 1;
+        }
+        std::cerr << "Loaded " << compile_db.size() << " compile commands\n";
+        for (const auto& cmd : compile_db.commands()) {
+            if (is_source_file(cmd.file)) {
+                source_files.push_back({cmd.file, schema_from_path(cmd.file)});
+            }
+        }
+    } else if (!build_dir_path.empty()) {
+        if (!compile_db.load_from_directory(build_dir_path)) {
+            std::cerr << "Error: No compile_commands.json in " << build_dir_path << "\n";
+            return 1;
+        }
+        std::cerr << "Loaded " << compile_db.size() << " compile commands\n";
+        for (const auto& cmd : compile_db.commands()) {
+            if (is_source_file(cmd.file)) {
+                source_files.push_back({cmd.file, schema_from_path(cmd.file)});
+            }
+        }
     }
 
     //=========================================================================
