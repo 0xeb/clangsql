@@ -9,6 +9,8 @@
 #include <vector>
 #include <functional>
 #include <optional>
+#include <ctime>
+#include <utility>
 
 namespace clangsql {
 
@@ -44,6 +46,9 @@ public:
 private:
     CXIndex index_ = nullptr;
 };
+
+// Forward declaration for helper functions used in TranslationUnit methods
+inline std::string to_string(CXString cx_str);
 
 /// RAII wrapper for CXTranslationUnit
 class TranslationUnit {
@@ -131,6 +136,57 @@ public:
     /// Get diagnostic count
     unsigned diagnosticCount() const {
         return tu_ ? clang_getNumDiagnostics(tu_) : 0;
+    }
+
+    // ========================================================================
+    // AST Serialization (for caching)
+    // ========================================================================
+
+    /// Save the translation unit to a file (AST serialization)
+    /// @param ast_path Path to save the AST file
+    /// @return true on success
+    bool save(const std::string& ast_path) const {
+        if (!tu_) return false;
+        int result = clang_saveTranslationUnit(tu_, ast_path.c_str(),
+                                                CXSaveTranslationUnit_None);
+        return result == CXSaveError_None;
+    }
+
+    /// Load a translation unit from a saved AST file
+    /// @param index The libclang index
+    /// @param ast_path Path to the AST file
+    /// @return true on success
+    bool load(CXIndex index, const std::string& ast_path) {
+        if (tu_) {
+            clang_disposeTranslationUnit(tu_);
+            tu_ = nullptr;
+        }
+
+        CXErrorCode err = clang_createTranslationUnit2(index, ast_path.c_str(), &tu_);
+        if (err == CXError_Success && tu_) {
+            // Extract original source path from the TU
+            path_ = to_string(clang_getTranslationUnitSpelling(tu_));
+            return true;
+        }
+        return false;
+    }
+
+    /// Get all included files (for dependency tracking)
+    /// @return Vector of {filename, mtime} pairs for all includes
+    std::vector<std::pair<std::string, std::time_t>> get_inclusions() const {
+        std::vector<std::pair<std::string, std::time_t>> result;
+        if (!tu_) return result;
+
+        clang_getInclusions(tu_,
+            [](CXFile file, CXSourceLocation* /*stack*/, unsigned /*depth*/, CXClientData data) {
+                auto* vec = static_cast<std::vector<std::pair<std::string, std::time_t>>*>(data);
+                std::string filename = to_string(clang_getFileName(file));
+                std::time_t mtime = static_cast<std::time_t>(clang_getFileTime(file));
+                vec->emplace_back(std::move(filename), mtime);
+            },
+            &result);
+
+        return result;
     }
 
 private:

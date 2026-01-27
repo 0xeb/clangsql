@@ -72,6 +72,13 @@ void print_usage(const char* argv0) {
               << "  --build-dir <path>         Load from build directory\n"
               << "  'src/**/*.cpp'             Glob pattern for source files\n"
               << "\n"
+              << "Cache Options:\n"
+              << "  --cache                    Enable AST caching (faster re-parses)\n"
+              << "  --no-cache                 Disable AST caching (default)\n"
+              << "  --cache-dir <path>         Set cache directory\n"
+              << "  --clear-cache              Clear all cached AST files\n"
+              << "  --cache-verbose            Show cache hit/miss messages\n"
+              << "\n"
               << "Remote Options:\n"
               << "  --remote host:port Connect to remote server\n"
               << "  -q <sql>           Execute SQL query (remote)\n"
@@ -222,6 +229,9 @@ bool is_clangsql_option(const std::string& arg) {
            arg == "--version" || arg == "--server" ||
            arg == "--remote" || arg == "--token" ||
            arg == "--compile-commands" || arg == "--build-dir" ||
+           arg == "--cache" || arg == "--no-cache" ||
+           arg == "--cache-dir" || arg == "--clear-cache" ||
+           arg == "--cache-verbose" ||
 #ifdef CLANGSQL_HAS_AI_AGENT
            arg == "--agent" || arg == "--prompt" ||
            arg == "--provider" || arg == "-v" ||
@@ -772,6 +782,12 @@ int main(int argc, char* argv[]) {
     std::string compile_commands_path;
     std::string build_dir_path;
 
+    // Cache options
+    bool cache_enabled = false;
+    bool cache_verbose = false;
+    bool clear_cache = false;
+    std::string cache_dir_path;
+
 #ifdef CLANGSQL_HAS_AI_AGENT
     bool agent_mode = false;
     bool agent_verbose = false;
@@ -813,6 +829,17 @@ int main(int argc, char* argv[]) {
             compile_commands_path = argv[++i];
         } else if (arg == "--build-dir" && i + 1 < argc) {
             build_dir_path = argv[++i];
+        } else if (arg == "--cache") {
+            cache_enabled = true;
+        } else if (arg == "--no-cache") {
+            cache_enabled = false;
+        } else if (arg == "--cache-dir" && i + 1 < argc) {
+            cache_dir_path = argv[++i];
+            cache_enabled = true;  // Implicitly enable if dir specified
+        } else if (arg == "--clear-cache") {
+            clear_cache = true;
+        } else if (arg == "--cache-verbose") {
+            cache_verbose = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -914,6 +941,20 @@ int main(int argc, char* argv[]) {
 
     // Create session
     clangsql::Session session;
+
+    // Configure caching
+    if (!cache_dir_path.empty()) {
+        // Custom cache directory specified
+        session.set_cache_dir(cache_dir_path);
+    }
+    session.set_caching_enabled(cache_enabled);
+    session.set_cache_verbose(cache_verbose);
+
+    // Handle --clear-cache
+    if (clear_cache) {
+        session.clear_ast_cache();
+        std::cerr << "Cache cleared (" << session.ast_cache().cache_dir().string() << ")" << std::endl;
+    }
 
     // Set default args from CLI
     if (!clang_args.empty()) {

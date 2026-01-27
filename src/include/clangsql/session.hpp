@@ -6,10 +6,12 @@
 #include <clangsql/parser.hpp>
 #include <clangsql/tables.hpp>
 #include <clangsql/compile_commands.hpp>
+#include <clangsql/ast_cache.hpp>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <sys/stat.h>
+#include <iostream>
 
 namespace clangsql {
 
@@ -43,6 +45,30 @@ public:
 
     /// Get the libclang index
     CXIndex index() const { return index_.get(); }
+
+    // ========================================================================
+    // AST Caching
+    // ========================================================================
+
+    /// Enable or disable AST caching
+    void set_caching_enabled(bool enabled) { caching_enabled_ = enabled; }
+    bool caching_enabled() const { return caching_enabled_; }
+
+    /// Enable verbose cache messages
+    void set_cache_verbose(bool verbose) { cache_verbose_ = verbose; }
+    bool cache_verbose() const { return cache_verbose_; }
+
+    /// Set cache directory (creates new cache with specified path)
+    void set_cache_dir(const std::filesystem::path& cache_dir) {
+        ast_cache_ = ASTCache(cache_dir);
+    }
+
+    /// Get the AST cache
+    ASTCache& ast_cache() { return ast_cache_; }
+    const ASTCache& ast_cache() const { return ast_cache_; }
+
+    /// Clear all cached AST files
+    void clear_ast_cache() { ast_cache_.clear(); }
 
     // ========================================================================
     // Default Arguments (applied to all subsequent attaches)
@@ -164,10 +190,32 @@ public:
         entry.args = merged_args;  // Store merged args for reload
         entry.mtime = get_file_mtime(path);
 
-        // Parse the translation unit
-        if (!entry.tu->parse(index_.get(), path, merged_args)) {
-            last_error_ = "Failed to parse '" + path + "'";
-            return false;
+        // Try to load from AST cache first
+        bool loaded_from_cache = false;
+        if (caching_enabled_ && ast_cache_.is_valid(path, merged_args, cache_verbose_)) {
+            if (ast_cache_.load(index_.get(), path, merged_args, *entry.tu)) {
+                loaded_from_cache = true;
+                if (cache_verbose_) {
+                    std::cerr << "[CACHE] Loaded from cache: " << path << std::endl;
+                }
+            }
+        }
+
+        // Parse if not loaded from cache
+        if (!loaded_from_cache) {
+            if (!entry.tu->parse(index_.get(), path, merged_args)) {
+                last_error_ = "Failed to parse '" + path + "'";
+                return false;
+            }
+
+            // Save to cache for next time
+            if (caching_enabled_) {
+                if (ast_cache_.save(path, merged_args, *entry.tu)) {
+                    if (cache_verbose_) {
+                        std::cerr << "[CACHE] Saved to cache: " << path << std::endl;
+                    }
+                }
+            }
         }
 
         // Register virtual tables with schema prefix (e.g., main_functions)
@@ -243,6 +291,11 @@ private:
     std::vector<std::string> default_args_;
     CompileCommandsDatabase compile_commands_db_;
     std::string last_error_;
+
+    // AST caching
+    ASTCache ast_cache_;
+    bool caching_enabled_ = false;  // Disabled by default
+    bool cache_verbose_ = false;
 };
 
 } // namespace clangsql
