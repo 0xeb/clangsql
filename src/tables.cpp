@@ -12,7 +12,7 @@
 namespace clangsql {
 
 // ============================================================================
-// Shared File Map (used by all table builders)
+// Shared ID Maps (used by all table builders for consistent foreign keys)
 // ============================================================================
 
 /// Shared file path to ID mapping
@@ -48,17 +48,42 @@ public:
     }
 };
 
+/// Shared USR to ID mapping for classes, functions, enums
+/// Built once and shared across all table builders for consistent foreign keys
+class EntityMap {
+public:
+    std::unordered_map<std::string, int64_t> class_usr_to_id;
+    std::unordered_map<std::string, int64_t> func_usr_to_id;
+    std::unordered_map<std::string, int64_t> enum_usr_to_id;
+
+    int64_t get_class_id(const std::string& usr) const {
+        auto it = class_usr_to_id.find(usr);
+        return (it != class_usr_to_id.end()) ? it->second : 0;
+    }
+
+    int64_t get_func_id(const std::string& usr) const {
+        auto it = func_usr_to_id.find(usr);
+        return (it != func_usr_to_id.end()) ? it->second : 0;
+    }
+
+    int64_t get_enum_id(const std::string& usr) const {
+        auto it = enum_usr_to_id.find(usr);
+        return (it != enum_usr_to_id.end()) ? it->second : 0;
+    }
+};
+
 // Forward declarations for _with_map variants
 static FileMap build_file_map(const TranslationUnit& tu);
+static EntityMap build_entity_map(const TranslationUnit& tu);
 std::vector<FileRow> build_files_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map);
+std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const FileMap& map);
 std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUnit& tu, const FileMap& map);
 
@@ -175,7 +200,7 @@ SourceRange get_definition_extent(CXCursor cursor) {
 } // anonymous namespace
 
 // ============================================================================
-// Build FileMap (must be called first)
+// Build FileMap and EntityMap (must be called first)
 // ============================================================================
 
 static FileMap build_file_map(const TranslationUnit& tu) {
@@ -199,6 +224,55 @@ static FileMap build_file_map(const TranslationUnit& tu) {
             map.path_to_id[loc.filename] = next_id++;
             seen.insert(loc.filename);
         }
+        return CXChildVisit_Recurse;
+    });
+
+    return map;
+}
+
+/// Build shared entity map for classes, functions, and enums
+/// This ensures consistent IDs across all tables that reference these entities
+static EntityMap build_entity_map(const TranslationUnit& tu) {
+    EntityMap map;
+    int64_t next_class_id = 1;
+    int64_t next_func_id = 1;
+    int64_t next_enum_id = 1;
+
+    CXCursor root = tu.cursor();
+
+    // Single pass to collect all entities with consistent IDs
+    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+        std::string usr = cursor_usr(cursor);
+
+        if (usr.empty()) {
+            return CXChildVisit_Recurse;
+        }
+
+        // Classes, structs, unions
+        if (kind == CXCursor_ClassDecl ||
+            kind == CXCursor_StructDecl ||
+            kind == CXCursor_UnionDecl) {
+            if (map.class_usr_to_id.find(usr) == map.class_usr_to_id.end()) {
+                map.class_usr_to_id[usr] = next_class_id++;
+            }
+        }
+        // Functions and methods
+        else if (kind == CXCursor_FunctionDecl ||
+                 kind == CXCursor_CXXMethod ||
+                 kind == CXCursor_Constructor ||
+                 kind == CXCursor_Destructor) {
+            if (map.func_usr_to_id.find(usr) == map.func_usr_to_id.end()) {
+                map.func_usr_to_id[usr] = next_func_id++;
+            }
+        }
+        // Enums
+        else if (kind == CXCursor_EnumDecl) {
+            if (map.enum_usr_to_id.find(usr) == map.enum_usr_to_id.end()) {
+                map.enum_usr_to_id[usr] = next_enum_id++;
+            }
+        }
+
         return CXChildVisit_Recurse;
     });
 
@@ -241,12 +315,12 @@ std::vector<FileRow> build_files_table_with_map(const TranslationUnit& tu, const
 
 std::vector<FunctionRow> build_functions_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_functions_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_functions_table_with_map(tu, map, entities);
 }
 
-std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<FunctionRow> functions;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -258,12 +332,18 @@ std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& t
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_func_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
         auto extent = get_definition_extent(cursor);  // Includes body for definitions
 
         FunctionRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -298,12 +378,12 @@ std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& t
 
 std::vector<ClassRow> build_classes_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_classes_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_classes_table_with_map(tu, map, entities);
 }
 
-std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<ClassRow> classes;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -317,11 +397,17 @@ std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, co
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_class_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
 
         ClassRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -349,31 +435,17 @@ std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, co
 
 std::vector<MethodRow> build_methods_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_methods_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_methods_table_with_map(tu, map, entities);
 }
 
-std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<MethodRow> methods;
-    std::unordered_map<std::string, int64_t> class_usr_to_id;
     int64_t next_id = 1;
 
-    // First pass: collect class USRs
     CXCursor root = tu.cursor();
-    int64_t class_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_ClassDecl ||
-            kind == CXCursor_StructDecl ||
-            kind == CXCursor_UnionDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (class_usr_to_id.find(usr) == class_usr_to_id.end()) {
-                class_usr_to_id[usr] = class_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
 
-    // Second pass: collect methods
+    // Collect methods using shared EntityMap for class_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -386,9 +458,9 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
         // Get parent class
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = class_usr_to_id.find(parent_usr);
-        if (it == class_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t class_id = entities.get_class_id(parent_usr);
+        if (class_id == 0) {
+            return CXChildVisit_Recurse;  // Parent class not in entity map
         }
 
         auto loc = cursor_location(cursor);
@@ -397,7 +469,7 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
         MethodRow row;
         row.id = next_id++;
         row.usr = cursor_usr(cursor);
-        row.class_id = it->second;
+        row.class_id = class_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -433,32 +505,17 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
 
 std::vector<FieldRow> build_fields_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_fields_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_fields_table_with_map(tu, map, entities);
 }
 
-std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<FieldRow> fields;
-    std::unordered_map<std::string, int64_t> class_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect class USRs
-    int64_t class_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_ClassDecl ||
-            kind == CXCursor_StructDecl ||
-            kind == CXCursor_UnionDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (class_usr_to_id.find(usr) == class_usr_to_id.end()) {
-                class_usr_to_id[usr] = class_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect fields
+    // Collect fields using shared EntityMap for class_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -469,14 +526,14 @@ std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, con
         // Get parent class
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = class_usr_to_id.find(parent_usr);
-        if (it == class_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t class_id = entities.get_class_id(parent_usr);
+        if (class_id == 0) {
+            return CXChildVisit_Recurse;  // Parent class not in entity map
         }
 
         FieldRow row;
         row.id = next_id++;
-        row.class_id = it->second;
+        row.class_id = class_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.type = cursor_type_spelling(cursor);
         row.access = access_string(clang_getCXXAccessSpecifier(cursor));
@@ -500,33 +557,17 @@ std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, con
 
 std::vector<VariableRow> build_variables_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_variables_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_variables_table_with_map(tu, map, entities);
 }
 
-std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<VariableRow> variables;
-    std::unordered_map<std::string, int64_t> func_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect function USRs
-    int64_t func_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_FunctionDecl ||
-            kind == CXCursor_CXXMethod ||
-            kind == CXCursor_Constructor ||
-            kind == CXCursor_Destructor) {
-            std::string usr = cursor_usr(cursor);
-            if (func_usr_to_id.find(usr) == func_usr_to_id.end()) {
-                func_usr_to_id[usr] = func_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect variables
+    // Collect variables using shared EntityMap for function_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -552,10 +593,9 @@ std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& t
             parent_kind == CXCursor_CXXMethod ||
             parent_kind == CXCursor_Constructor ||
             parent_kind == CXCursor_Destructor) {
-            // Local variable
+            // Local variable - use shared ID from EntityMap
             std::string parent_usr = cursor_usr(parent);
-            auto it = func_usr_to_id.find(parent_usr);
-            row.function_id = (it != func_usr_to_id.end()) ? it->second : 0;
+            row.function_id = entities.get_func_id(parent_usr);
 
             CX_StorageClass storage = clang_Cursor_getStorageClass(cursor);
             row.scope_kind = (storage == CX_SC_Static) ? "static_local" : "local";
@@ -591,33 +631,17 @@ std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& t
 
 std::vector<ParameterRow> build_parameters_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_parameters_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_parameters_table_with_map(tu, map, entities);
 }
 
-std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<ParameterRow> parameters;
-    std::unordered_map<std::string, int64_t> func_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect function USRs
-    int64_t func_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_FunctionDecl ||
-            kind == CXCursor_CXXMethod ||
-            kind == CXCursor_Constructor ||
-            kind == CXCursor_Destructor) {
-            std::string usr = cursor_usr(cursor);
-            if (func_usr_to_id.find(usr) == func_usr_to_id.end()) {
-                func_usr_to_id[usr] = func_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect parameters
+    // Collect parameters using shared EntityMap for function_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -628,14 +652,14 @@ std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit&
         // Get parent function
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = func_usr_to_id.find(parent_usr);
-        if (it == func_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t function_id = entities.get_func_id(parent_usr);
+        if (function_id == 0) {
+            return CXChildVisit_Recurse;  // Parent function not in entity map
         }
 
         ParameterRow row;
         row.id = next_id++;
-        row.function_id = it->second;
+        row.function_id = function_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.type = cursor_type_spelling(cursor);
 
@@ -674,12 +698,12 @@ std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit&
 
 std::vector<EnumRow> build_enums_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_enums_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_enums_table_with_map(tu, map, entities);
 }
 
-std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<EnumRow> enums;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -690,11 +714,17 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_enum_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
 
         EnumRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
 
         // Get underlying type
@@ -718,29 +748,17 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
 
 std::vector<EnumValueRow> build_enum_values_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_enum_values_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_enum_values_table_with_map(tu, map, entities);
 }
 
-std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<EnumValueRow> values;
-    std::unordered_map<std::string, int64_t> enum_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect enum USRs
-    int64_t enum_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        if (clang_getCursorKind(cursor) == CXCursor_EnumDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (enum_usr_to_id.find(usr) == enum_usr_to_id.end()) {
-                enum_usr_to_id[usr] = enum_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect enum values
+    // Collect enum values using shared EntityMap for enum_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         if (clang_getCursorKind(cursor) != CXCursor_EnumConstantDecl) {
             return CXChildVisit_Recurse;
@@ -749,14 +767,14 @@ std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit
         // Get parent enum
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = enum_usr_to_id.find(parent_usr);
-        if (it == enum_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t enum_id = entities.get_enum_id(parent_usr);
+        if (enum_id == 0) {
+            return CXChildVisit_Recurse;  // Parent enum not in entity map
         }
 
         EnumValueRow row;
         row.id = next_id++;
-        row.enum_id = it->second;
+        row.enum_id = enum_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.value = clang_getEnumConstantDeclValue(cursor);
         row.is_system = is_in_system_header(cursor);
@@ -913,19 +931,20 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
 
 void register_tables(xsql::Database& db, const TranslationUnit& tu,
                      const std::string& schema) {
-    // Build shared file map ONCE
+    // Build shared maps ONCE for consistent IDs across all tables
     FileMap file_map = build_file_map(tu);
+    EntityMap entity_map = build_entity_map(tu);
 
     // Pre-build all table data (captures by value avoid dangling reference issues)
     auto files_data = std::make_shared<std::vector<FileRow>>(build_files_table_with_map(tu, file_map));
-    auto functions_data = std::make_shared<std::vector<FunctionRow>>(build_functions_table_with_map(tu, file_map));
-    auto classes_data = std::make_shared<std::vector<ClassRow>>(build_classes_table_with_map(tu, file_map));
-    auto methods_data = std::make_shared<std::vector<MethodRow>>(build_methods_table_with_map(tu, file_map));
-    auto fields_data = std::make_shared<std::vector<FieldRow>>(build_fields_table_with_map(tu, file_map));
-    auto variables_data = std::make_shared<std::vector<VariableRow>>(build_variables_table_with_map(tu, file_map));
-    auto parameters_data = std::make_shared<std::vector<ParameterRow>>(build_parameters_table_with_map(tu, file_map));
-    auto enums_data = std::make_shared<std::vector<EnumRow>>(build_enums_table_with_map(tu, file_map));
-    auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map));
+    auto functions_data = std::make_shared<std::vector<FunctionRow>>(build_functions_table_with_map(tu, file_map, entity_map));
+    auto classes_data = std::make_shared<std::vector<ClassRow>>(build_classes_table_with_map(tu, file_map, entity_map));
+    auto methods_data = std::make_shared<std::vector<MethodRow>>(build_methods_table_with_map(tu, file_map, entity_map));
+    auto fields_data = std::make_shared<std::vector<FieldRow>>(build_fields_table_with_map(tu, file_map, entity_map));
+    auto variables_data = std::make_shared<std::vector<VariableRow>>(build_variables_table_with_map(tu, file_map, entity_map));
+    auto parameters_data = std::make_shared<std::vector<ParameterRow>>(build_parameters_table_with_map(tu, file_map, entity_map));
+    auto enums_data = std::make_shared<std::vector<EnumRow>>(build_enums_table_with_map(tu, file_map, entity_map));
+    auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map, entity_map));
     auto calls_data = std::make_shared<std::vector<CallRow>>(build_calls_table_with_map(tu, file_map));
     auto inheritance_data = std::make_shared<std::vector<InheritanceRow>>(build_inheritance_table_with_map(tu, file_map));
 
