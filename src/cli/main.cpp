@@ -469,11 +469,12 @@ void run_agent_repl(clangsql::Session& session, clangsql::AIAgent& agent) {
         }
 
         if (is_complete) {
-            // Send to agent with streaming
-            std::string response = agent.query_streaming(buffer, [](const std::string& delta) {
-                std::cout << delta << std::flush;
-            });
-            std::cout << "\n\n";
+            // Send to agent
+            std::string response = agent.query(buffer);
+            if (!response.empty()) {
+                std::cout << response << std::endl;
+            }
+            std::cout << "\n";
             buffer.clear();
         }
     }
