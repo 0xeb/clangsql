@@ -1020,10 +1020,10 @@ int main(int argc, char* argv[]) {
 
         // Single prompt mode
         if (!agent_prompt.empty()) {
-            std::string response = agent.query_streaming(agent_prompt, [](const std::string& delta) {
-                std::cout << delta << std::flush;
-            });
-            std::cout << "\n";
+            std::string result = agent.query(agent_prompt);
+            if (!result.empty()) {
+                printf("%s\n", result.c_str());
+            }
             return 0;
         }
 
