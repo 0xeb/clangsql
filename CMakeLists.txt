@@ -131,6 +131,12 @@ endif()
 
 add_subdirectory(src)
 
+# Examples (off by default, enable with -DCLANGSQL_BUILD_EXAMPLES=ON)
+option(CLANGSQL_BUILD_EXAMPLES "Build example projects" OFF)
+if(CLANGSQL_BUILD_EXAMPLES)
+    add_subdirectory(examples/sample_project)
+endif()
+
 # Tests are in the private xsql monorepo (tests/clangsql/)
 
 # ============================================================================
