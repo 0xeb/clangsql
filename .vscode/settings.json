@@ -2,6 +2,7 @@
     "files.exclude": {
         "**/build": true,
         "**/build_*": true,
+        "**/build*": true,
         "**/out": true,
         "**/CMakeFiles": true,
         "**/CMakeCache.txt": true,
