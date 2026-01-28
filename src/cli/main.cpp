@@ -57,6 +57,7 @@ void print_usage(const char* argv0) {
               << "  " << prog << " --remote host:port [options]\n"
               << "\n"
               << "Local Options:\n"
+              << "  -s, --source <path>  Source file (alternative to positional)\n"
               << "  -e <sql>           Execute SQL query and exit\n"
               << "  -i                 Interactive mode (REPL)\n"
 #ifdef CLANGSQL_HAS_AI_AGENT
@@ -232,6 +233,7 @@ std::vector<std::string> expand_glob(const std::string& pattern) {
 /// Check if argument is a clangsql option (not a Clang arg)
 bool is_clangsql_option(const std::string& arg) {
     return arg == "-e" || arg == "-q" || arg == "-i" ||
+           arg == "-s" || arg == "--source" ||
            arg == "-h" || arg == "--help" ||
            arg == "--version" || arg == "--server" ||
            arg == "--http" || arg == "--bind" ||
@@ -1118,6 +1120,14 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-v") {
             agent_verbose = true;
 #endif
+        } else if ((arg == "-s" || arg == "--source") && i + 1 < argc) {
+            // Explicit source file option
+            std::string src = argv[++i];
+            auto [path, schema] = parse_file_spec(src);
+            if (schema.empty()) {
+                schema = schema_from_path(path);
+            }
+            source_files.push_back({path, schema});
         } else if (is_glob_pattern(arg)) {
             // Expand glob pattern
             auto matches = expand_glob(arg);
