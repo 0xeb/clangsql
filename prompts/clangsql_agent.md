@@ -429,3 +429,84 @@ If a query returns unexpected results:
 3. **Check counts**: `SELECT COUNT(*) FROM table WHERE is_system = 0`
 4. **Inspect sample**: `SELECT * FROM table WHERE is_system = 0 LIMIT 5`
 5. **Verify joins**: Print both sides before joining
+
+---
+
+## Server Modes
+
+CLANGSQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+
+---
+
+### HTTP REST Server (Recommended)
+
+Standard REST API that works with curl, any HTTP client, or LLM tools.
+
+**Starting the server:**
+```bash
+# Default port 8081
+clangsql main.cpp --http
+
+# Custom port and bind address
+clangsql main.cpp --http 9000 --bind 0.0.0.0
+
+# With authentication
+clangsql main.cpp --http 8081 --token mysecret
+```
+
+**HTTP Endpoints:**
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/` | GET | No | Welcome message |
+| `/help` | GET | No | API documentation (for LLM discovery) |
+| `/query` | POST | Yes* | Execute SQL (body = raw SQL) |
+| `/status` | GET | Yes* | Health check |
+| `/health` | GET | Yes* | Alias for /status |
+| `/shutdown` | POST | Yes* | Stop server |
+
+*Auth required only if `--token` was specified.
+
+**Example with curl:**
+```bash
+# Get API documentation
+curl http://localhost:8081/help
+
+# Execute SQL query
+curl -X POST http://localhost:8081/query -d "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
+
+# With authentication
+curl -X POST http://localhost:8081/query \
+     -H "Authorization: Bearer mysecret" \
+     -d "SELECT * FROM classes"
+
+# Check status
+curl http://localhost:8081/status
+```
+
+**Response Format (JSON):**
+```json
+{"success": true, "columns": ["name"], "rows": [["main"]], "row_count": 1}
+```
+
+```json
+{"success": false, "error": "no such table: bad_table"}
+```
+
+---
+
+### Raw TCP Server (Legacy)
+
+Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
+
+**Starting the server:**
+```bash
+clangsql main.cpp --server 13337
+clangsql main.cpp --server 13337 --token mysecret
+```
+
+**Connecting as client:**
+```bash
+clangsql --remote localhost:13337 -q "SELECT name FROM functions LIMIT 5"
+clangsql --remote localhost:13337 -i
+```
