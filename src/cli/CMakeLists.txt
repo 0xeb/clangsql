@@ -40,6 +40,11 @@ if(CLANGSQL_WITH_AI_AGENT)
     target_include_directories(clangsql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 endif()
 
+# Add HTTP server support
+if(CLANGSQL_WITH_HTTP)
+    target_compile_definitions(clangsql_cli PRIVATE CLANGSQL_HAS_HTTP)
+endif()
+
 # Install CLI
 install(TARGETS clangsql_cli
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

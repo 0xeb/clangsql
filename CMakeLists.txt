@@ -13,6 +13,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # ============================================================================
+# HTTP Server Support (optional, uses cpp-httplib via libxsql thinclient)
+# ============================================================================
+
+option(CLANGSQL_WITH_HTTP "Build with HTTP REST server support" OFF)
+
+if(CLANGSQL_WITH_HTTP)
+    message(STATUS "clangsql: Building with HTTP server support")
+    set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
+endif()
+
+# ============================================================================
 # libxsql dependency
 # ============================================================================
 

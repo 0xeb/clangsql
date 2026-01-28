@@ -6,6 +6,9 @@
 #include <clangsql/compile_commands.hpp>
 #include <xsql/socket/server.hpp>
 #include <xsql/socket/client.hpp>
+#ifdef CLANGSQL_HAS_HTTP
+#include <xsql/thinclient/server.hpp>
+#endif
 #include <iostream>
 #include <string>
 #include <vector>
@@ -62,7 +65,11 @@ void print_usage(const char* argv0) {
               << "  --provider <name>  AI provider (claude, copilot)\n"
               << "  -v                 Verbose agent output\n"
 #endif
-              << "  --server [port]    Start server mode (default: " << clangsql::DEFAULT_PORT << ")\n"
+              << "  --server [port]    Start TCP server (default: " << clangsql::DEFAULT_PORT << ")\n"
+#ifdef CLANGSQL_HAS_HTTP
+              << "  --http [port]      Start HTTP REST server (default: 8080)\n"
+              << "  --bind <addr>      Bind address for server (default: 127.0.0.1)\n"
+#endif
               << "  --token <token>    Auth token for server mode\n"
               << "  -h, --help         Show this help\n"
               << "  --version          Show version\n"
@@ -227,6 +234,7 @@ bool is_clangsql_option(const std::string& arg) {
     return arg == "-e" || arg == "-q" || arg == "-i" ||
            arg == "-h" || arg == "--help" ||
            arg == "--version" || arg == "--server" ||
+           arg == "--http" || arg == "--bind" ||
            arg == "--remote" || arg == "--token" ||
            arg == "--compile-commands" || arg == "--build-dir" ||
            arg == "--cache" || arg == "--no-cache" ||
@@ -761,6 +769,243 @@ int run_server_mode(clangsql::Session& session, int port, const std::string& aut
 }
 
 //=============================================================================
+// HTTP Server Mode
+//=============================================================================
+
+#ifdef CLANGSQL_HAS_HTTP
+static xsql::thinclient::server* g_http_server = nullptr;
+
+static void http_signal_handler(int) {
+    if (g_http_server) g_http_server->stop();
+}
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 10);
+    for (char ch : s) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(ch));
+                    out += buf;
+                } else {
+                    out += ch;
+                }
+        }
+    }
+    return out;
+}
+
+static std::string query_result_to_json(const xsql::Result& result) {
+    std::ostringstream json;
+    json << "{";
+    json << "\"success\":" << (result.ok() ? "true" : "false");
+
+    if (result.ok()) {
+        json << ",\"columns\":[";
+        for (size_t i = 0; i < result.columns.size(); i++) {
+            if (i > 0) json << ",";
+            json << "\"" << json_escape(result.columns[i]) << "\"";
+        }
+        json << "]";
+
+        json << ",\"rows\":[";
+        for (size_t i = 0; i < result.rows.size(); i++) {
+            if (i > 0) json << ",";
+            json << "[";
+            for (size_t c = 0; c < result.rows[i].size(); c++) {
+                if (c > 0) json << ",";
+                json << "\"" << json_escape(result.rows[i][c]) << "\"";
+            }
+            json << "]";
+        }
+        json << "]";
+        json << ",\"row_count\":" << result.rows.size();
+    } else {
+        json << ",\"error\":\"" << json_escape(result.error) << "\"";
+    }
+
+    json << "}";
+    return json.str();
+}
+
+static const char* CLANGSQL_HELP_TEXT = R"(CLANGSQL HTTP REST API
+======================
+
+SQL interface for Clang AST via HTTP.
+
+Endpoints:
+  GET  /         - Welcome message
+  GET  /help     - This documentation (for LLM discovery)
+  POST /query    - Execute SQL (body = raw SQL, response = JSON)
+  GET  /status   - Server health
+  GET  /health   - Alias for /status
+  POST /shutdown - Stop server
+
+Tables (per schema):
+  [schema_]files       - Source files
+  [schema_]functions   - Functions and methods
+  [schema_]classes     - Classes, structs, unions
+  [schema_]methods     - Class methods
+  [schema_]fields      - Class/struct fields
+  [schema_]variables   - Variables (global, local)
+  [schema_]parameters  - Function parameters
+  [schema_]enums       - Enumerations
+  [schema_]calls       - Function call sites
+  [schema_]inheritance - Class inheritance
+
+Example Queries:
+  SELECT name, return_type FROM functions WHERE is_virtual = 1;
+  SELECT name, kind FROM classes;
+  SELECT caller, callee FROM calls;
+
+Response Format:
+  Success: {"success": true, "columns": [...], "rows": [[...]], "row_count": N}
+  Error:   {"success": false, "error": "message"}
+
+Example:
+  curl http://localhost:8080/help
+  curl -X POST http://localhost:8080/query -d "SELECT name FROM functions LIMIT 5"
+)";
+
+int run_http_mode(clangsql::Session& session, int port, const std::string& bind_addr, const std::string& auth_token) {
+    xsql::thinclient::server_config cfg;
+    cfg.port = port;
+    cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+    if (!auth_token.empty()) cfg.auth_token = auth_token;
+    if (!bind_addr.empty() && bind_addr != "127.0.0.1" && bind_addr != "localhost") {
+        cfg.allow_insecure_no_auth = auth_token.empty();
+    }
+
+    std::mutex query_mutex;
+
+    cfg.setup_routes = [&session, &auth_token, &query_mutex, port](httplib::Server& svr) {
+        svr.Get("/", [port](const httplib::Request&, httplib::Response& res) {
+            std::string welcome = "CLANGSQL HTTP Server\n\nEndpoints:\n"
+                "  GET  /help     - API documentation\n"
+                "  POST /query    - Execute SQL query\n"
+                "  GET  /status   - Health check\n"
+                "  POST /shutdown - Stop server\n\n"
+                "Example: curl -X POST http://localhost:" + std::to_string(port) + "/query -d \"SELECT name FROM functions LIMIT 5\"\n";
+            res.set_content(welcome, "text/plain");
+        });
+
+        svr.Get("/help", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(CLANGSQL_HELP_TEXT, "text/plain");
+        });
+
+        svr.Post("/query", [&session, &auth_token, &query_mutex](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            if (req.body.empty()) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"Empty query\"}", "application/json");
+                return;
+            }
+            std::lock_guard<std::mutex> lock(query_mutex);
+            auto result = session.query(req.body);
+            res.set_content(query_result_to_json(result), "application/json");
+        });
+
+        svr.Get("/status", [&session, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            auto result = session.query("SELECT COUNT(*) FROM functions");
+            std::string count = result.ok() && !result.empty() ? result.rows[0][0] : "?";
+            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"clangsql\",\"functions\":" + count + "}", "application/json");
+        });
+
+        // GET /health - Alias for /status
+        svr.Get("/health", [&session, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            auto result = session.query("SELECT COUNT(*) FROM functions");
+            std::string count = result.ok() && !result.empty() ? result.rows[0][0] : "?";
+            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"clangsql\",\"functions\":" + count + "}", "application/json");
+        });
+
+        svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            res.set_content("{\"success\":true,\"message\":\"Shutting down\"}", "application/json");
+            std::thread([&svr] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                svr.stop();
+            }).detach();
+        });
+    };
+
+    xsql::thinclient::server http_server(cfg);
+    g_http_server = &http_server;
+
+    auto old_handler = std::signal(SIGINT, http_signal_handler);
+
+    std::cout << "HTTP server listening on http://" << cfg.bind_address << ":" << port << "\n";
+    std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
+    std::cout << "Example: curl http://localhost:" << port << "/help\n";
+    std::cout << "Press Ctrl+C to stop.\n\n";
+    std::cout.flush();
+
+    http_server.run();
+
+    std::signal(SIGINT, old_handler);
+    g_http_server = nullptr;
+    std::cout << "\nHTTP server stopped.\n";
+    return 0;
+}
+#endif // CLANGSQL_HAS_HTTP
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -776,9 +1021,12 @@ int main(int argc, char* argv[]) {
     std::string query;
     std::string remote_spec;
     std::string auth_token;
+    std::string bind_addr;
     int server_port = clangsql::DEFAULT_PORT;
+    int http_port = 8080;
     bool interactive = false;
     bool server_mode = false;
+    bool http_mode = false;
     bool after_dashdash = false;
     std::string compile_commands_path;
     std::string build_dir_path;
@@ -822,6 +1070,18 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
+        } else if (arg == "--http") {
+            http_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                try {
+                    http_port = std::stoi(argv[++i]);
+                } catch (...) {
+                    std::cerr << "Invalid HTTP port number\n";
+                    return 1;
+                }
+            }
+        } else if (arg == "--bind" && i + 1 < argc) {
+            bind_addr = argv[++i];
         } else if (arg == "--remote" && i + 1 < argc) {
             remote_spec = argv[++i];
         } else if (arg == "--token" && i + 1 < argc) {
@@ -896,8 +1156,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: Cannot use both source files and --remote\n";
             return 1;
         }
-        if (server_mode) {
-            std::cerr << "Error: Cannot use both --server and --remote\n";
+        if (server_mode || http_mode) {
+            std::cerr << "Error: Cannot use both --server/--http and --remote\n";
             return 1;
         }
         return run_remote_mode(remote_spec, query, auth_token, interactive);
@@ -989,6 +1249,17 @@ int main(int argc, char* argv[]) {
     if (server_mode) {
         return run_server_mode(session, server_port, auth_token);
     }
+
+#ifdef CLANGSQL_HAS_HTTP
+    if (http_mode) {
+        return run_http_mode(session, http_port, bind_addr, auth_token);
+    }
+#else
+    if (http_mode) {
+        std::cerr << "Error: HTTP mode not available. Rebuild with -DCLANGSQL_WITH_HTTP=ON\n";
+        return 1;
+    }
+#endif
 
     //=========================================================================
     // AI Agent Mode
