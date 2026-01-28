@@ -2,15 +2,18 @@
 
 SQL interface for Clang AST databases. Query C/C++ source code using SQL.
 
-Part of the [xsql](https://github.com/allthingsida/xsql) family (idasql, pdbsql, clangsql).
+Part of the [xsql](https://github.com/allthingsida/xsql) project family.
 
 ## Features
 
 - Parse C/C++ source files with libclang
 - Query AST entities via SQL: functions, classes, methods, variables, enums
-- Multi-translation-unit support with ATTACH syntax
+- Multi-translation-unit support with schema prefixes
+- AI agent mode for natural language queries (Claude, Copilot)
+- AST caching for fast repeated queries
+- Server mode for remote analysis
 - Cross-platform: Windows, macOS, Linux
-- Same API patterns as idasql/pdbsql
+- Consistent xsql API patterns
 
 ## Quick Start
 
@@ -83,6 +86,39 @@ clangsql main.cpp --clear-cache -e "SELECT 1"
 ```
 
 Cache is invalidated when source files, includes, compiler args, or Clang version change.
+
+## AI Agent Mode
+
+Query your codebase using natural language:
+
+```bash
+# Interactive AI session
+clangsql main.cpp --agent -i
+
+# Single-shot prompt
+clangsql main.cpp --prompt "Find all virtual methods"
+
+# Verbose mode shows generated SQL
+clangsql main.cpp --agent -v -i
+
+# Choose provider (claude or copilot)
+clangsql main.cpp --agent --provider claude -i
+```
+
+The agent generates SQL queries based on your natural language questions and executes them against the parsed AST.
+
+## Server Mode
+
+Host a parsed AST over TCP for remote querying:
+
+```bash
+# Start server (default port 17198)
+clangsql main.cpp --server
+
+# Remote client (no libclang required)
+clangsql --remote localhost:17198 -q "SELECT name FROM functions"
+clangsql --remote localhost:17198 -i
+```
 
 ## Example Queries
 
@@ -274,6 +310,4 @@ MIT License - see [LICENSE](LICENSE)
 
 ## Related Projects
 
-- [idasql](https://github.com/allthingsida/idasql) - SQL interface for IDA databases
-- [pdbsql](https://github.com/0xeb/pdbsql) - SQL interface for PDB files
 - [libxsql](https://github.com/0xeb/libxsql) - Shared virtual table framework

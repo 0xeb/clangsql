@@ -2,7 +2,7 @@
 /// @file clangsql.hpp
 /// @brief Public API for clangsql - SQL interface for Clang AST
 ///
-/// Part of the xsql family (idasql, pdbsql, clangsql)
+/// Part of the xsql project family
 
 #include <clangsql/json.hpp>
 #include <clangsql/parser.hpp>
