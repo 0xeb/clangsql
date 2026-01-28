@@ -389,7 +389,7 @@ std::string execute_sql_for_agent(clangsql::Session& session, const std::string&
 /// Run agent-enabled REPL
 void run_agent_repl(clangsql::Session& session, clangsql::AIAgent& agent) {
     std::cout << "clangsql " << clangsql::VERSION << " - AI Agent Mode\n";
-    std::cout << "Type .help for help, .quit to exit\n";
+    std::cout << "Type .help for help, .clear to reset, .quit to exit\n";
     std::cout << "You can use natural language or SQL queries.\n\n";
 
     // Install signal handler
@@ -490,7 +490,7 @@ void run_agent_repl(clangsql::Session& session, clangsql::AIAgent& agent) {
 /// Run interactive REPL
 void run_repl(clangsql::Session& session) {
     std::cout << "clangsql " << clangsql::VERSION << " - Interactive Mode\n";
-    std::cout << "Type .help for help, .quit to exit\n\n";
+    std::cout << "Type .help for help, .clear to reset, .quit to exit\n\n";
 
     std::string line;
     std::string buffer;
@@ -627,7 +627,7 @@ void print_remote_result(const xsql::socket::RemoteResult& result) {
 /// Run remote interactive REPL
 int run_remote_repl(xsql::socket::Client& client) {
     std::cout << "clangsql " << clangsql::VERSION << " - Remote Interactive Mode\n";
-    std::cout << "Type .help for help, .quit to exit\n\n";
+    std::cout << "Type .help for help, .clear to reset, .quit to exit\n\n";
 
     std::string line;
     std::string buffer;
