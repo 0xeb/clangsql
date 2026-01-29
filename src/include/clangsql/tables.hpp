@@ -149,6 +149,7 @@ struct CallRow {
     std::string caller_usr;     ///< USR of the calling function/method
     std::string callee_usr;     ///< USR of the called function/method
     std::string callee_name;    ///< Name of the called function (for display)
+    int64_t file_id;            ///< File containing the call site (for project mode)
     unsigned line;              ///< Line of the call site
     unsigned column;            ///< Column of the call site
     bool is_virtual;            ///< True if calling a virtual method
@@ -163,7 +164,20 @@ struct InheritanceRow {
     std::string base_usr;       ///< USR of the base class
     std::string base_name;      ///< Name of the base class (for display)
     std::string access;         ///< "public", "protected", "private"
+    int64_t file_id;            ///< File containing the inheritance (for project mode)
     bool is_virtual;            ///< True if virtual inheritance
+    bool is_system;             ///< True if in system header
+};
+
+/// Row for the 'string_literals' table (string constants in source)
+struct StringLiteralRow {
+    int64_t id;
+    std::string content;        ///< The string content (unescaped)
+    int64_t file_id;            ///< File containing the string
+    unsigned line;              ///< Line number
+    unsigned column;            ///< Column number
+    std::string function_usr;   ///< Enclosing function USR (empty if global)
+    bool is_wide;               ///< True for L"string"
     bool is_system;             ///< True if in system header
 };
 
@@ -203,6 +217,9 @@ std::vector<CallRow> build_calls_table(const TranslationUnit& tu);
 
 /// Build inheritance rows from a translation unit (class hierarchy)
 std::vector<InheritanceRow> build_inheritance_table(const TranslationUnit& tu);
+
+/// Build string literal rows from a translation unit
+std::vector<StringLiteralRow> build_string_literals_table(const TranslationUnit& tu);
 
 // ============================================================================
 // Virtual table registration

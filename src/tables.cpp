@@ -86,6 +86,7 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
 std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const FileMap& map);
 std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUnit& tu, const FileMap& map);
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map);
 
 // ============================================================================
 // AST Traversal Helpers
@@ -846,6 +847,7 @@ std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const
             row.caller_usr = caller_usr;
             row.callee_usr = cursor_usr(callee);
             row.callee_name = cursor_spelling(callee);
+            row.file_id = map.get_id(loc.filename);
             row.line = loc.line;
             row.column = loc.column;
 
@@ -899,6 +901,8 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
             CXType base_type = clang_getCursorType(child);
             CXCursor base_class = clang_getTypeDeclaration(base_type);
 
+            auto loc = cursor_location(class_cursor);
+
             InheritanceRow row;
             row.id = next_id++;
             row.derived_usr = derived_usr;
@@ -908,6 +912,9 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
 
             // Get access specifier
             row.access = access_string(clang_getCXXAccessSpecifier(child));
+
+            // Get file info
+            row.file_id = map.get_id(loc.filename);
 
             // Check for virtual inheritance
             row.is_virtual = clang_isVirtualBase(child) != 0;
@@ -923,6 +930,173 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
     });
 
     return inheritance;
+}
+
+std::vector<StringLiteralRow> build_string_literals_table(const TranslationUnit& tu) {
+    FileMap map = build_file_map(tu);
+    return build_string_literals_table_with_map(tu, map);
+}
+
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+    std::vector<StringLiteralRow> strings;
+    int64_t next_id = 1;
+
+    CXCursor root = tu.cursor();
+
+    // Context for tracking enclosing function
+    struct VisitorContext {
+        std::vector<StringLiteralRow>& strings;
+        const FileMap& map;
+        int64_t& next_id;
+        std::string current_func_usr;  // USR of enclosing function (empty if global)
+    };
+
+    VisitorContext ctx{strings, map, next_id, ""};
+
+    // Recursive visitor that tracks function context
+    std::function<CXChildVisitResult(CXCursor, CXCursor, VisitorContext&)> visit_recursive;
+    visit_recursive = [&visit_recursive](CXCursor cursor, CXCursor, VisitorContext& ctx) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+
+        // Track enclosing function
+        std::string saved_func_usr = ctx.current_func_usr;
+        if (kind == CXCursor_FunctionDecl ||
+            kind == CXCursor_CXXMethod ||
+            kind == CXCursor_Constructor ||
+            kind == CXCursor_Destructor) {
+            if (is_definition(cursor)) {
+                ctx.current_func_usr = cursor_usr(cursor);
+            }
+        }
+
+        // Capture string literals
+        if (kind == CXCursor_StringLiteral) {
+            auto loc = cursor_location(cursor);
+
+            StringLiteralRow row;
+            row.id = ctx.next_id++;
+            row.file_id = ctx.map.get_id(loc.filename);
+            row.line = loc.line;
+            row.column = loc.column;
+            row.function_usr = ctx.current_func_usr;
+            row.is_system = is_in_system_header(cursor);
+
+            // Get the string content
+            // Note: clang_getCursorSpelling returns the literal as written (with quotes)
+            std::string literal = cursor_spelling(cursor);
+
+            // Check for wide string (L"...")
+            row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+            // Extract content (remove quotes and prefix)
+            if (!literal.empty()) {
+                size_t start = literal.find('"');
+                size_t end = literal.rfind('"');
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    row.content = literal.substr(start + 1, end - start - 1);
+                } else {
+                    row.content = literal;
+                }
+            }
+
+            ctx.strings.push_back(row);
+        }
+
+        // Visit children
+        clang_visitChildren(cursor,
+            [](CXCursor child, CXCursor parent, CXClientData data) -> CXChildVisitResult {
+                auto& ctx = *static_cast<VisitorContext*>(data);
+                // Call our recursive function
+                std::function<CXChildVisitResult(CXCursor, CXCursor, VisitorContext&)>* fn = nullptr;
+                // We need to access the outer function - use a different approach
+                return CXChildVisit_Recurse;  // Let clang handle recursion
+            },
+            &ctx);
+
+        // Restore function context
+        ctx.current_func_usr = saved_func_usr;
+
+        return CXChildVisit_Recurse;
+    };
+
+    // Start visiting from root
+    visit_children(root, [&](CXCursor cursor, CXCursor parent) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+
+        // Track enclosing function
+        if (kind == CXCursor_FunctionDecl ||
+            kind == CXCursor_CXXMethod ||
+            kind == CXCursor_Constructor ||
+            kind == CXCursor_Destructor) {
+            if (is_definition(cursor)) {
+                std::string func_usr = cursor_usr(cursor);
+
+                // Visit this function's children to find string literals
+                visit_children(cursor, [&](CXCursor child, CXCursor) -> CXChildVisitResult {
+                    if (clang_getCursorKind(child) == CXCursor_StringLiteral) {
+                        auto loc = cursor_location(child);
+
+                        StringLiteralRow row;
+                        row.id = next_id++;
+                        row.file_id = map.get_id(loc.filename);
+                        row.line = loc.line;
+                        row.column = loc.column;
+                        row.function_usr = func_usr;
+                        row.is_system = is_in_system_header(child);
+
+                        // Get the string content
+                        std::string literal = cursor_spelling(child);
+                        row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+                        // Extract content (remove quotes and prefix)
+                        if (!literal.empty()) {
+                            size_t start = literal.find('"');
+                            size_t end = literal.rfind('"');
+                            if (start != std::string::npos && end != std::string::npos && end > start) {
+                                row.content = literal.substr(start + 1, end - start - 1);
+                            } else {
+                                row.content = literal;
+                            }
+                        }
+
+                        strings.push_back(row);
+                    }
+                    return CXChildVisit_Recurse;
+                });
+            }
+        }
+        // Also capture global string literals (outside functions)
+        else if (kind == CXCursor_StringLiteral) {
+            auto loc = cursor_location(cursor);
+
+            StringLiteralRow row;
+            row.id = next_id++;
+            row.file_id = map.get_id(loc.filename);
+            row.line = loc.line;
+            row.column = loc.column;
+            row.function_usr = "";  // Global scope
+            row.is_system = is_in_system_header(cursor);
+
+            std::string literal = cursor_spelling(cursor);
+            row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+            if (!literal.empty()) {
+                size_t start = literal.find('"');
+                size_t end = literal.rfind('"');
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    row.content = literal.substr(start + 1, end - start - 1);
+                } else {
+                    row.content = literal;
+                }
+            }
+
+            strings.push_back(row);
+        }
+
+        return CXChildVisit_Recurse;
+    });
+
+    return strings;
 }
 
 // ============================================================================
@@ -947,6 +1121,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
     auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map, entity_map));
     auto calls_data = std::make_shared<std::vector<CallRow>>(build_calls_table_with_map(tu, file_map));
     auto inheritance_data = std::make_shared<std::vector<InheritanceRow>>(build_inheritance_table_with_map(tu, file_map));
+    auto string_literals_data = std::make_shared<std::vector<StringLiteralRow>>(build_string_literals_table_with_map(tu, file_map));
 
     // Use schema as table name prefix (e.g., "main" -> "main_functions")
     // Empty schema means no prefix (backward compatible)
@@ -1126,6 +1301,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_text("caller_usr", [](const CallRow& r) { return r.caller_usr; })
         .column_text("callee_usr", [](const CallRow& r) { return r.callee_usr; })
         .column_text("callee_name", [](const CallRow& r) { return r.callee_name; })
+        .column_int64("file_id", [](const CallRow& r) { return r.file_id; })
         .column_int("line", [](const CallRow& r) { return static_cast<int>(r.line); })
         .column_int("column", [](const CallRow& r) { return static_cast<int>(r.column); })
         .column_int("is_virtual", [](const CallRow& r) { return r.is_virtual ? 1 : 0; })
@@ -1144,10 +1320,27 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_text("base_usr", [](const InheritanceRow& r) { return r.base_usr; })
         .column_text("base_name", [](const InheritanceRow& r) { return r.base_name; })
         .column_text("access", [](const InheritanceRow& r) { return r.access; })
+        .column_int64("file_id", [](const InheritanceRow& r) { return r.file_id; })
         .column_int("is_virtual", [](const InheritanceRow& r) { return r.is_virtual ? 1 : 0; })
         .column_int("is_system", [](const InheritanceRow& r) { return r.is_system ? 1 : 0; })
         .build();
     db.register_and_create_cached_table(inheritance_def);
+
+    // String literals table
+    auto string_literals_def = xsql::cached_table<StringLiteralRow>((prefix + "string_literals").c_str())
+        .cache_builder([string_literals_data](std::vector<StringLiteralRow>& cache) {
+            cache = *string_literals_data;
+        })
+        .column_int64("id", [](const StringLiteralRow& r) { return r.id; })
+        .column_text("content", [](const StringLiteralRow& r) { return r.content; })
+        .column_int64("file_id", [](const StringLiteralRow& r) { return r.file_id; })
+        .column_int("line", [](const StringLiteralRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
+        .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
+        .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
+        .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(string_literals_def);
 }
 
 } // namespace clangsql
