@@ -89,7 +89,20 @@ Cache is invalidated when source files, includes, compiler args, or Clang versio
 
 ## AI Agent Mode
 
-Query your codebase using natural language:
+Query your codebase using natural language.
+
+### Prerequisites for AI Features
+
+The AI agent requires one of these CLI tools installed and authenticated:
+
+| Provider | CLI Tool | Install | Login |
+|----------|----------|---------|-------|
+| Claude (default) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | Run `claude`, then `/login` |
+| GitHub Copilot | [Copilot CLI](https://github.com/features/copilot/cli/) | `npm install -g @github/copilot` | Run `copilot`, then `/login` |
+
+**Important:** You must be logged in before using AI features.
+
+### Usage
 
 ```bash
 # Interactive AI session
