@@ -4,6 +4,7 @@
 #include <clangsql/clangsql.hpp>
 #include <clangsql/session.hpp>
 #include <clangsql/compile_commands.hpp>
+#include <clangsql/project.hpp>
 #include <xsql/socket/server.hpp>
 #include <xsql/socket/client.hpp>
 #ifdef CLANGSQL_HAS_HTTP
@@ -76,6 +77,9 @@ void print_usage(const char* argv0) {
               << "  --version          Show version\n"
               << "\n"
               << "Project Options:\n"
+              << "  --project <dir>            Parse entire directory (unified schema)\n"
+              << "  --pattern <glob>           File patterns for --project (default: *.c *.cpp)\n"
+              << "  --exclude <dir>            Directories to exclude (default: test,build)\n"
               << "  --compile-commands <path>  Load compile_commands.json\n"
               << "  --build-dir <path>         Load from build directory\n"
               << "  'src/**/*.cpp'             Glob pattern for source files\n"
@@ -1043,6 +1047,12 @@ int main(int argc, char* argv[]) {
     std::string compile_commands_path;
     std::string build_dir_path;
 
+    // Project mode options
+    std::string project_path;
+    std::vector<std::string> project_patterns;
+    std::vector<std::string> project_excludes;
+    bool project_mode = false;
+
     // Cache options
     bool cache_enabled = false;
     bool cache_verbose = false;
@@ -1102,6 +1112,13 @@ int main(int argc, char* argv[]) {
             compile_commands_path = argv[++i];
         } else if (arg == "--build-dir" && i + 1 < argc) {
             build_dir_path = argv[++i];
+        } else if (arg == "--project" && i + 1 < argc) {
+            project_path = argv[++i];
+            project_mode = true;
+        } else if (arg == "--pattern" && i + 1 < argc) {
+            project_patterns.push_back(argv[++i]);
+        } else if (arg == "--exclude" && i + 1 < argc) {
+            project_excludes.push_back(argv[++i]);
         } else if (arg == "--cache") {
             cache_enabled = true;
         } else if (arg == "--no-cache") {
@@ -1212,9 +1229,61 @@ int main(int argc, char* argv[]) {
     }
 
     //=========================================================================
+    // Project mode - discover and parse all files in directory
+    //=========================================================================
+    if (project_mode) {
+        clangsql::ProjectConfig config;
+        config.root_path = project_path;
+
+        // Use provided patterns or defaults
+        if (!project_patterns.empty()) {
+            config.patterns = project_patterns;
+        }
+
+        // Use provided excludes or defaults
+        if (!project_excludes.empty()) {
+            config.exclude = project_excludes;
+        }
+
+        // Add include paths from clang_args
+        for (size_t i = 0; i < clang_args.size(); ++i) {
+            if (clang_args[i].substr(0, 2) == "-I") {
+                if (clang_args[i].size() > 2) {
+                    config.include_paths.push_back(clang_args[i].substr(2));
+                } else if (i + 1 < clang_args.size()) {
+                    config.include_paths.push_back(clang_args[++i]);
+                }
+            } else if (clang_args[i].substr(0, 2) == "-D") {
+                if (clang_args[i].size() > 2) {
+                    config.defines.push_back(clang_args[i].substr(2));
+                } else if (i + 1 < clang_args.size()) {
+                    config.defines.push_back(clang_args[++i]);
+                }
+            } else if (clang_args[i].substr(0, 5) == "-std=") {
+                config.std_version = clang_args[i].substr(5);
+            }
+        }
+
+        clangsql::Project project = clangsql::Project::load(config);
+
+        if (!project.valid()) {
+            std::cerr << "Error: " << project.error() << "\n";
+            return 1;
+        }
+
+        std::cerr << "Project: " << project_path << "\n";
+        std::cerr << "Found " << project.file_count() << " source files\n";
+
+        // Add all project files with empty schema (unified mode)
+        for (const auto& file : project.source_files()) {
+            source_files.push_back({file, ""});  // Empty schema = unified
+        }
+    }
+
+    //=========================================================================
     // Local modes - require source files
     //=========================================================================
-    if (source_files.empty()) {
+    if (source_files.empty() && !project_mode) {
         std::cerr << "Error: No source files specified (or use --remote)\n";
         print_usage(argv[0]);
         return 1;
@@ -1242,26 +1311,69 @@ int main(int argc, char* argv[]) {
         session.set_default_args(clang_args);
     }
 
-    // Attach all source files
-    bool single_file = (source_files.size() == 1);
-    for (const auto& [path, schema] : source_files) {
-        std::cerr << "Parsing " << path << "...\n";
+    //=========================================================================
+    // Project mode - parse all files and register unified tables
+    //=========================================================================
+    if (project_mode) {
+        // Parse all project files into separate TUs
+        std::vector<std::unique_ptr<clangsql::TranslationUnit>> parsed_tus;
+        std::vector<const clangsql::TranslationUnit*> tu_ptrs;
+        int success_count = 0;
+        int fail_count = 0;
 
-        // For single file, use empty schema (no prefix)
-        std::string effective_schema = single_file ? "" : schema;
+        for (const auto& [path, schema] : source_files) {
+            std::cerr << "Parsing " << path << "...\n";
 
-        if (!session.attach(path, effective_schema)) {
-            std::cerr << "Error: " << session.last_error() << "\n";
+            auto tu = std::make_unique<clangsql::TranslationUnit>();
+            if (tu->parse(session.index(), path, clang_args)) {
+                tu_ptrs.push_back(tu.get());
+                parsed_tus.push_back(std::move(tu));
+                success_count++;
+            } else {
+                std::cerr << "  Warning: Failed to parse (skipped)\n";
+                fail_count++;
+            }
+        }
+
+        std::cerr << "\nParsed " << success_count << " files";
+        if (fail_count > 0) {
+            std::cerr << " (" << fail_count << " failed)";
+        }
+        std::cerr << "\n";
+
+        if (tu_ptrs.empty()) {
+            std::cerr << "Error: No files parsed successfully\n";
             return 1;
         }
 
-        if (single_file) {
-            std::cerr << "Attached (no prefix)\n";
-        } else {
-            std::cerr << "Attached as: " << schema << "_*\n";
-        }
+        // Register unified tables from all TUs
+        clangsql::register_project_tables(session.database(), tu_ptrs, "");
+        std::cerr << "Registered unified tables\n\n";
     }
-    std::cerr << "\n";
+    //=========================================================================
+    // Normal mode - attach individual files
+    //=========================================================================
+    else {
+        bool single_file = (source_files.size() == 1);
+        for (const auto& [path, schema] : source_files) {
+            std::cerr << "Parsing " << path << "...\n";
+
+            // For single file, use empty schema (no prefix)
+            std::string effective_schema = single_file ? "" : schema;
+
+            if (!session.attach(path, effective_schema)) {
+                std::cerr << "Error: " << session.last_error() << "\n";
+                return 1;
+            }
+
+            if (single_file) {
+                std::cerr << "Attached (no prefix)\n";
+            } else {
+                std::cerr << "Attached as: " << schema << "_*\n";
+            }
+        }
+        std::cerr << "\n";
+    }
 
     //=========================================================================
     // Server mode

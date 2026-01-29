@@ -232,4 +232,13 @@ std::vector<StringLiteralRow> build_string_literals_table(const TranslationUnit&
 void register_tables(xsql::Database& db, const TranslationUnit& tu,
                      const std::string& schema = "");
 
+/// Register all clangsql virtual tables from multiple translation units
+/// Creates unified tables combining data from all TUs (project mode)
+/// @param db The xsql database
+/// @param tus Vector of translation units to expose
+/// @param schema Schema prefix (typically empty for unified mode)
+void register_project_tables(xsql::Database& db,
+                             const std::vector<const TranslationUnit*>& tus,
+                             const std::string& schema = "");
+
 } // namespace clangsql
