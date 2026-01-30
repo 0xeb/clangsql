@@ -87,7 +87,7 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
 std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const FileMap& map);
 std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map);
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 
 // ============================================================================
 // AST Traversal Helpers
@@ -935,10 +935,11 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
 
 std::vector<StringLiteralRow> build_string_literals_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_string_literals_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_string_literals_table_with_map(tu, map, entities);
 }
 
-std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<StringLiteralRow> strings;
     int64_t next_id = 1;
 
@@ -948,11 +949,13 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
     struct VisitorContext {
         std::vector<StringLiteralRow>& strings;
         const FileMap& map;
+        const EntityMap& entities;
         int64_t& next_id;
         std::string current_func_usr;  // USR of enclosing function (empty if global)
+        int64_t current_func_id;       // ID of enclosing function (0 if global)
     };
 
-    VisitorContext ctx{strings, map, next_id, ""};
+    VisitorContext ctx{strings, map, entities, next_id, "", 0};
 
     // Recursive visitor that tracks function context
     std::function<CXChildVisitResult(CXCursor, CXCursor, VisitorContext&)> visit_recursive;
@@ -1031,6 +1034,7 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
             kind == CXCursor_Destructor) {
             if (is_definition(cursor)) {
                 std::string func_usr = cursor_usr(cursor);
+                int64_t func_id = entities.get_func_id(func_usr);
 
                 // Visit this function's children to find string literals
                 visit_children(cursor, [&](CXCursor child, CXCursor) -> CXChildVisitResult {
@@ -1043,6 +1047,7 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
                         row.line = loc.line;
                         row.column = loc.column;
                         row.function_usr = func_usr;
+                        row.func_id = func_id;
                         row.is_system = is_in_system_header(child);
 
                         // Get the string content
@@ -1076,6 +1081,7 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
             row.line = loc.line;
             row.column = loc.column;
             row.function_usr = "";  // Global scope
+            row.func_id = 0;        // No enclosing function
             row.is_system = is_in_system_header(cursor);
 
             std::string literal = cursor_spelling(cursor);
@@ -1122,7 +1128,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
     auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map, entity_map));
     auto calls_data = std::make_shared<std::vector<CallRow>>(build_calls_table_with_map(tu, file_map));
     auto inheritance_data = std::make_shared<std::vector<InheritanceRow>>(build_inheritance_table_with_map(tu, file_map));
-    auto string_literals_data = std::make_shared<std::vector<StringLiteralRow>>(build_string_literals_table_with_map(tu, file_map));
+    auto string_literals_data = std::make_shared<std::vector<StringLiteralRow>>(build_string_literals_table_with_map(tu, file_map, entity_map));
 
     // Use schema as table name prefix (e.g., "main" -> "main_functions")
     // Empty schema means no prefix (backward compatible)
@@ -1338,6 +1344,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_int("line", [](const StringLiteralRow& r) { return static_cast<int>(r.line); })
         .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
         .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
+        .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
         .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
         .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
         .build();
@@ -1472,7 +1479,7 @@ void register_project_tables(xsql::Database& db,
         }
 
         // String literals (keep all - each occurrence is unique)
-        auto tu_strings = build_string_literals_table_with_map(*tu, file_map);
+        auto tu_strings = build_string_literals_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_strings) {
             string_literals_data->push_back(std::move(row));
         }
@@ -1717,6 +1724,7 @@ void register_project_tables(xsql::Database& db,
         .column_int("line", [](const StringLiteralRow& r) { return static_cast<int>(r.line); })
         .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
         .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
+        .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
         .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
         .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
         .build();

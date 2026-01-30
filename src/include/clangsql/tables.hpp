@@ -177,6 +177,7 @@ struct StringLiteralRow {
     unsigned line;              ///< Line number
     unsigned column;            ///< Column number
     std::string function_usr;   ///< Enclosing function USR (empty if global)
+    int64_t func_id;            ///< Enclosing function ID (0 if global) - for fast queries
     bool is_wide;               ///< True for L"string"
     bool is_system;             ///< True if in system header
 };
