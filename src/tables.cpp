@@ -1637,7 +1637,7 @@ void register_project_tables(xsql::Database& db,
         .column_int64("function_id", [](const ParameterRow& r) { return r.function_id; })
         .column_text("name", [](const ParameterRow& r) { return r.name; })
         .column_text("type", [](const ParameterRow& r) { return r.type; })
-        .column_int("index", [](const ParameterRow& r) { return r.index; })
+        .column_int("index_", [](const ParameterRow& r) { return r.index; })
         .column_int("has_default", [](const ParameterRow& r) { return r.has_default ? 1 : 0; })
         .column_int("is_system", [](const ParameterRow& r) { return r.is_system ? 1 : 0; })
         .build();
