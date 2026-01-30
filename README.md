@@ -72,20 +72,28 @@ cmake --build build
 
 ## AST Caching
 
-clangsql can cache parsed AST files to speed up repeated runs on unchanged files:
+Enable caching to avoid re-parsing unchanged files. **Recommended for project mode** where you'll run multiple queries against the same codebase.
 
 ```bash
-# Enable caching (stores AST in ~/.cache/clangsql or %LOCALAPPDATA%\clangsql)
+# Enable caching for single file
 clangsql main.cpp --cache -e "SELECT name FROM functions"
 
-# Show cache hit/miss messages
-clangsql main.cpp --cache --cache-verbose -i
+# Enable caching for project mode (big speedup on re-runs!)
+clangsql --project ./src --cache -i
 
-# Clear the cache
-clangsql main.cpp --clear-cache -e "SELECT 1"
+# Show cache hit/miss messages
+clangsql --project ./src --cache --cache-verbose -i
+
+# Custom cache directory
+clangsql --project ./src --cache-dir /path/to/cache -i
+
+# Clear all cached files
+clangsql --clear-cache
 ```
 
-Cache is invalidated when source files, includes, compiler args, or Clang version change.
+**Cache location:** `%LOCALAPPDATA%\clangsql\cache` (Windows) or `~/.cache/clangsql` (Linux/macOS)
+
+**What's validated:** Cache is invalidated when source files, any included headers, compiler args, or Clang version change. Each file's mtime is checked, so only modified files are re-parsed.
 
 ## AI Agent Mode
 

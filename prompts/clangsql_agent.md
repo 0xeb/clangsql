@@ -45,7 +45,88 @@ clangsql --remote localhost:17198 -q "SELECT ..."      # Remote client
 clangsql main.cpp -- -std=c++17 -I./include            # Pass Clang flags
 ```
 
-## Tables (11 total)
+## Project Mode
+
+Analyze entire codebases with a unified schema. Files are deduplicated by USR, giving you a single view across all translation units.
+
+```bash
+# Analyze all .cpp files in a directory
+clangsql --project ./src -i
+
+# Custom file patterns
+clangsql --project ./src --pattern "*.cpp" --pattern "*.cxx" -i
+
+# Exclude directories
+clangsql --project ./src --exclude build --exclude third_party -i
+
+# With Clang flags
+clangsql --project ./src -- -std=c++17 -I./include -DDEBUG
+```
+
+### AST Caching (Speed Up Re-parses)
+
+Enable caching to avoid re-parsing unchanged files. Cache validates source AND all include file mtimes.
+
+```bash
+# Enable caching (disabled by default)
+clangsql --project ./src --cache -i
+
+# With verbose output (shows cache hits/misses)
+clangsql --project ./src --cache --cache-verbose -i
+
+# Custom cache directory
+clangsql --project ./src --cache-dir C:/my/cache -i
+
+# Clear all cached files
+clangsql --clear-cache
+```
+
+**Cache location:** `%LOCALAPPDATA%\clangsql\cache` (Windows) or `~/.cache/clangsql` (Linux/macOS)
+
+**When to use:** Enable `--cache` for repeated analysis of the same project. First parse is slightly slower (writes cache), but subsequent runs are much faster for unchanged files.
+
+### How Deduplication Works
+- **Functions, classes, methods, variables, enums**: Deduplicated by USR (same symbol = one row)
+- **Files**: Deduplicated by normalized path
+- **Calls, inheritance, string_literals**: NOT deduplicated (each occurrence preserved with `file_id`)
+
+### Project Mode Queries
+
+```sql
+-- Files in the project
+SELECT path FROM files WHERE is_system = 0;
+
+-- Functions with their source files
+SELECT f.name, fi.path
+FROM functions f
+JOIN files fi ON f.file_id = fi.id
+WHERE f.is_system = 0;
+
+-- Calls by source file
+SELECT fi.path, c.callee_name, COUNT(*) as call_count
+FROM calls c
+JOIN files fi ON c.file_id = fi.id
+WHERE c.is_system = 0
+GROUP BY fi.path, c.callee_name
+ORDER BY call_count DESC;
+
+-- String literals across the project
+SELECT value, COUNT(*) as occurrences
+FROM string_literals
+WHERE is_system = 0
+GROUP BY value
+ORDER BY occurrences DESC LIMIT 20;
+
+-- Functions per file
+SELECT fi.path, COUNT(f.id) as func_count
+FROM files fi
+LEFT JOIN functions f ON f.file_id = fi.id
+WHERE fi.is_system = 0
+GROUP BY fi.id
+ORDER BY func_count DESC;
+```
+
+## Tables (12 total)
 
 All tables have `is_system` column (1=system header, 0=user code).
 
@@ -170,6 +251,7 @@ Function call graph.
 | callee_name | TEXT | Called function name |
 | line, column | INT | Call site position |
 | is_virtual | INT | 1=virtual method call |
+| file_id | INT | FK to files (project mode) |
 
 ### inheritance
 Class hierarchy.
@@ -183,6 +265,45 @@ Class hierarchy.
 | base_name | TEXT | Base class name |
 | access | TEXT | "public", "protected", "private" |
 | is_virtual | INT | 1=virtual inheritance |
+| file_id | INT | FK to files (project mode) |
+
+### string_literals
+String constants found in code, with direct FK to enclosing function for fast queries.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INT | Primary key |
+| content | TEXT | String content (unescaped) |
+| file_id | INT | FK to files |
+| line | INT | Line number |
+| column | INT | Column number |
+| function_usr | TEXT | Enclosing function USR (empty if global) |
+| func_id | INT | **FK to functions** (0 if global) - fast queries! |
+| is_wide | INT | 1=wide string (L"...") |
+| is_system | INT | 1=system header |
+
+**Fast String Queries (use func_id, not line ranges!):**
+```sql
+-- All strings in a specific function (O(1) lookup)
+SELECT content FROM string_literals WHERE func_id = 42;
+
+-- Which function has the most string literals? (fast GROUP BY)
+SELECT f.name, COUNT(*) as count
+FROM string_literals s
+JOIN functions f ON s.func_id = f.id
+WHERE s.is_system = 0 AND f.is_system = 0
+GROUP BY s.func_id
+ORDER BY count DESC LIMIT 10;
+
+-- Functions with hardcoded "password" strings
+SELECT DISTINCT f.name
+FROM string_literals s
+JOIN functions f ON s.func_id = f.id
+WHERE s.content LIKE '%password%' AND s.is_system = 0;
+
+-- Global strings (not inside any function)
+SELECT content FROM string_literals WHERE func_id = 0 AND is_system = 0;
+```
 
 ## Common Queries
 
