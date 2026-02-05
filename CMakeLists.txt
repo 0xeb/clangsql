@@ -16,7 +16,7 @@ endif()
 # HTTP Server Support (optional, uses cpp-httplib via libxsql thinclient)
 # ============================================================================
 
-option(CLANGSQL_WITH_HTTP "Build with HTTP REST server support" OFF)
+option(CLANGSQL_WITH_HTTP "Build with HTTP REST server support" ON)
 
 if(CLANGSQL_WITH_HTTP)
     message(STATUS "clangsql: Building with HTTP server support")

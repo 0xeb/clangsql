@@ -72,9 +72,7 @@ jobs:
         shell: bash
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_DIR="$LLVM_DIR" \
-            -DCLANGSQL_WITH_HTTP=ON \
-            -DCLANGSQL_WITH_AI_AGENT=ON
+            -DLLVM_DIR="$LLVM_DIR"
 
       - name: Build
         shell: bash
