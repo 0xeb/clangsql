@@ -7,8 +7,8 @@
 #include <clangsql/project.hpp>
 #include <xsql/socket/server.hpp>
 #include <xsql/socket/client.hpp>
-#ifdef CLANGSQL_HAS_HTTP
-#include <xsql/thinclient/server.hpp>
+#if defined(CLANGSQL_HAS_HTTP) && !defined(CLANGSQL_HAS_AI_AGENT)
+#include "http_server.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -24,15 +24,26 @@
 #ifdef CLANGSQL_HAS_AI_AGENT
 #include "ai_agent.hpp"
 #include "clangsql_commands.hpp"
+#include "mcp_server.hpp"
+#ifdef CLANGSQL_HAS_HTTP
+#include "http_server.hpp"
+#endif
 #include <csignal>
 #include <atomic>
 
 // Global agent pointer for signal handler
 static std::atomic<clangsql::AIAgent*> g_agent{nullptr};
+static std::atomic<bool> g_quit_requested{false};
+static std::unique_ptr<clangsql::ClangsqlMCPServer> g_mcp_server;
+static std::unique_ptr<clangsql::AIAgent> g_mcp_agent;
+#ifdef CLANGSQL_HAS_HTTP
+static std::unique_ptr<clangsql::ClangsqlHTTPServer> g_repl_http_server;
+#endif
 
 // Signal handler for Ctrl-C
 void signal_handler(int signum) {
     if (signum == SIGINT) {
+        g_quit_requested.store(true);
         auto* agent = g_agent.load();
         if (agent) {
             agent->request_quit();
@@ -298,6 +309,10 @@ std::string schema_from_path(const std::string& path) {
     return filename;
 }
 
+// Forward declarations
+static std::string json_escape(const std::string& s);
+static std::string query_result_to_json(const xsql::Result& result);
+
 /// Print result in tabular format
 void print_result(const xsql::Result& result) {
     if (!result.ok()) {
@@ -452,6 +467,156 @@ void run_agent_repl(clangsql::Session& session, clangsql::AIAgent& agent) {
                 agent.reset_session();
                 return std::string("Agent session cleared");
             };
+
+            // MCP server callbacks
+            callbacks.mcp_status = []() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    return clangsql::format_mcp_status(g_mcp_server->port(), true);
+                } else {
+                    return "MCP server not running\nUse '.mcp start' to start\n";
+                }
+            };
+
+            callbacks.mcp_start = [&session, &agent]() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    return clangsql::format_mcp_status(g_mcp_server->port(), true);
+                }
+
+                // Create MCP server if needed
+                if (!g_mcp_server) {
+                    g_mcp_server = std::make_unique<clangsql::ClangsqlMCPServer>();
+                }
+
+                // SQL executor - will be called on main thread via run_until_stopped()
+                clangsql::QueryCallback sql_cb = [&session](const std::string& sql) -> std::string {
+                    auto result = session.query(sql);
+                    return query_result_to_json(result);
+                };
+
+                // Create MCP agent for natural language queries
+                g_mcp_agent = std::make_unique<clangsql::AIAgent>(sql_cb);
+                g_mcp_agent->start();
+
+                clangsql::AskCallback ask_cb = [](const std::string& question) -> std::string {
+                    if (!g_mcp_agent) return "Error: AI agent not available";
+                    return g_mcp_agent->query(question);
+                };
+
+                // Start with use_queue=true for CLI mode (main thread execution)
+                int port = g_mcp_server->start(0, sql_cb, ask_cb, "127.0.0.1", true);
+                if (port <= 0) {
+                    g_mcp_agent.reset();
+                    return "Error: Failed to start MCP server\n";
+                }
+
+                // Print info
+                std::cout << clangsql::format_mcp_info(port, true);
+                std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
+                std::cout.flush();
+
+                // Install signal handler so Ctrl+C sets g_quit_requested
+                g_quit_requested.store(false);
+                auto old_handler = std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
+#endif
+
+                // Set interrupt check to stop on Ctrl+C
+                g_mcp_server->set_interrupt_check([]() {
+                    return g_quit_requested.load();
+                });
+
+                // Enter wait loop - processes MCP commands on main thread
+                g_mcp_server->run_until_stopped();
+
+                // Restore previous signal handler
+                std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+                std::signal(SIGBREAK, old_break_handler);
+#endif
+                g_mcp_agent.reset();
+                g_quit_requested.store(false);
+
+                return "MCP server stopped. Returning to REPL.\n";
+            };
+
+            callbacks.mcp_stop = []() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    g_mcp_server->stop();
+                    g_mcp_agent.reset();
+                    return "MCP server stopped\n";
+                }
+                return "MCP server not running\n";
+            };
+
+#ifdef CLANGSQL_HAS_HTTP
+            // HTTP server callbacks
+            callbacks.http_status = []() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    return clangsql::format_http_status(g_repl_http_server->port(), true);
+                }
+                return "HTTP server not running\nUse '.http start' to start\n";
+            };
+
+            callbacks.http_start = [&session]() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    return clangsql::format_http_status(g_repl_http_server->port(), true);
+                }
+
+                // Create HTTP server if needed
+                if (!g_repl_http_server) {
+                    g_repl_http_server = std::make_unique<clangsql::ClangsqlHTTPServer>();
+                }
+
+                // SQL executor - called on main thread via run_until_stopped()
+                clangsql::HTTPQueryCallback sql_cb = [&session](const std::string& sql) -> std::string {
+                    auto result = session.query(sql);
+                    return query_result_to_json(result);
+                };
+
+                // Start with use_queue=true (CLI mode), port=0 (random 8100-8199)
+                int port = g_repl_http_server->start(0, sql_cb, "127.0.0.1", true);
+                if (port <= 0) {
+                    return "Error: Failed to start HTTP server\n";
+                }
+
+                // Print info
+                std::cout << clangsql::format_http_info(port);
+                std::cout.flush();
+
+                // Install signal handler so Ctrl+C sets g_quit_requested
+                g_quit_requested.store(false);
+                auto old_handler = std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
+#endif
+
+                // Set interrupt check to stop on Ctrl+C
+                g_repl_http_server->set_interrupt_check([]() {
+                    return g_quit_requested.load();
+                });
+
+                // Enter wait loop - processes HTTP commands on main thread
+                g_repl_http_server->run_until_stopped();
+
+                // Restore previous signal handler
+                std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+                std::signal(SIGBREAK, old_break_handler);
+#endif
+                g_quit_requested.store(false);
+
+                return "HTTP server stopped. Returning to REPL.\n";
+            };
+
+            callbacks.http_stop = []() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    g_repl_http_server->stop();
+                    return "HTTP server stopped\n";
+                }
+                return "HTTP server not running\n";
+            };
+#endif
 
             std::string output;
             auto cmd_result = clangsql::handle_command(line, callbacks, output);
@@ -779,7 +944,7 @@ int run_server_mode(clangsql::Session& session, int port, const std::string& aut
 //=============================================================================
 
 #ifdef CLANGSQL_HAS_HTTP
-static xsql::thinclient::server* g_http_server = nullptr;
+static clangsql::ClangsqlHTTPServer* g_http_server = nullptr;
 
 static void http_signal_handler(int) {
     if (g_http_server) g_http_server->stop();
@@ -885,13 +1050,9 @@ Example:
 )";
 
 int run_http_mode(clangsql::Session& session, int port, const std::string& bind_addr, const std::string& auth_token) {
-    xsql::thinclient::server_config cfg;
-    cfg.port = port;
-    cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;
-    if (!auth_token.empty()) cfg.auth_token = auth_token;
-    // Allow non-loopback binds if explicitly requested (with warning)
+    std::string actual_bind = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+
     if (!bind_addr.empty() && bind_addr != "127.0.0.1" && bind_addr != "localhost") {
-        cfg.allow_insecure_no_auth = auth_token.empty();
         std::cerr << "WARNING: Binding to non-loopback address " << bind_addr << "\n";
         if (auth_token.empty()) {
             std::cerr << "WARNING: No authentication token set. Server is accessible without authentication.\n";
@@ -900,119 +1061,33 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
     }
 
     std::mutex query_mutex;
+    clangsql::ClangsqlHTTPServer http_server;
 
-    cfg.setup_routes = [&session, &auth_token, &query_mutex, port](httplib::Server& svr) {
-        svr.Get("/", [port](const httplib::Request&, httplib::Response& res) {
-            std::string welcome = "CLANGSQL HTTP Server\n\nEndpoints:\n"
-                "  GET  /help     - API documentation\n"
-                "  POST /query    - Execute SQL query\n"
-                "  GET  /status   - Health check\n"
-                "  POST /shutdown - Stop server\n\n"
-                "Example: curl -X POST http://localhost:" + std::to_string(port) + "/query -d \"SELECT name FROM functions LIMIT 5\"\n";
-            res.set_content(welcome, "text/plain");
-        });
-
-        svr.Get("/help", [](const httplib::Request&, httplib::Response& res) {
-            res.set_content(CLANGSQL_HELP_TEXT, "text/plain");
-        });
-
-        svr.Post("/query", [&session, &auth_token, &query_mutex](const httplib::Request& req, httplib::Response& res) {
-            if (!auth_token.empty()) {
-                std::string token;
-                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
-                else if (req.has_header("Authorization")) {
-                    auto auth = req.get_header_value("Authorization");
-                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
-                }
-                if (token != auth_token) {
-                    res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
-                    return;
-                }
-            }
-            if (req.body.empty()) {
-                res.status = 400;
-                res.set_content("{\"success\":false,\"error\":\"Empty query\"}", "application/json");
-                return;
-            }
-            std::lock_guard<std::mutex> lock(query_mutex);
-            auto result = session.query(req.body);
-            res.set_content(query_result_to_json(result), "application/json");
-        });
-
-        svr.Get("/status", [&session, &auth_token](const httplib::Request& req, httplib::Response& res) {
-            if (!auth_token.empty()) {
-                std::string token;
-                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
-                else if (req.has_header("Authorization")) {
-                    auto auth = req.get_header_value("Authorization");
-                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
-                }
-                if (token != auth_token) {
-                    res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
-                    return;
-                }
-            }
-            auto result = session.query("SELECT COUNT(*) FROM functions");
-            std::string count = result.ok() && !result.empty() ? result.rows[0][0] : "?";
-            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"clangsql\",\"functions\":" + count + "}", "application/json");
-        });
-
-        // GET /health - Alias for /status
-        svr.Get("/health", [&session, &auth_token](const httplib::Request& req, httplib::Response& res) {
-            if (!auth_token.empty()) {
-                std::string token;
-                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
-                else if (req.has_header("Authorization")) {
-                    auto auth = req.get_header_value("Authorization");
-                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
-                }
-                if (token != auth_token) {
-                    res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
-                    return;
-                }
-            }
-            auto result = session.query("SELECT COUNT(*) FROM functions");
-            std::string count = result.ok() && !result.empty() ? result.rows[0][0] : "?";
-            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"clangsql\",\"functions\":" + count + "}", "application/json");
-        });
-
-        svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
-            if (!auth_token.empty()) {
-                std::string token;
-                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
-                else if (req.has_header("Authorization")) {
-                    auto auth = req.get_header_value("Authorization");
-                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
-                }
-                if (token != auth_token) {
-                    res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
-                    return;
-                }
-            }
-            res.set_content("{\"success\":true,\"message\":\"Shutting down\"}", "application/json");
-            std::thread([&svr] {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                svr.stop();
-            }).detach();
-        });
+    auto query_cb = [&session, &query_mutex](const std::string& sql) -> std::string {
+        std::lock_guard<std::mutex> lock(query_mutex);
+        auto result = session.query(sql);
+        return query_result_to_json(result);
     };
 
-    xsql::thinclient::server http_server(cfg);
-    g_http_server = &http_server;
+    int actual_port = http_server.start(port, query_cb, actual_bind, false);
+    if (actual_port <= 0) {
+        std::cerr << "Error: Failed to start HTTP server on port " << port << "\n";
+        return 1;
+    }
 
+    g_http_server = &http_server;
     auto old_handler = std::signal(SIGINT, http_signal_handler);
 
-    std::cout << "HTTP server listening on http://" << cfg.bind_address << ":" << port << "\n";
+    std::cout << "HTTP server listening on http://" << actual_bind << ":" << actual_port << "\n";
     std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
-    std::cout << "Example: curl http://localhost:" << port << "/help\n";
+    std::cout << "Example: curl http://localhost:" << actual_port << "/help\n";
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
 
-    http_server.run();
+    // Wait for server to stop (Ctrl+C or /shutdown)
+    while (http_server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     std::signal(SIGINT, old_handler);
     g_http_server = nullptr;

@@ -5,6 +5,7 @@ set(CLI_SOURCES main.cpp)
 if(CLANGSQL_WITH_AI_AGENT)
     list(APPEND CLI_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
     )
 
     # Generate embedded prompt header
@@ -36,13 +37,21 @@ target_link_libraries(clangsql_cli PRIVATE
 # Add AI agent support
 if(CLANGSQL_WITH_AI_AGENT)
     target_compile_definitions(clangsql_cli PRIVATE CLANGSQL_HAS_AI_AGENT)
-    target_link_libraries(clangsql_cli PRIVATE libagents::libagents)
-    target_include_directories(clangsql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
+    target_link_libraries(clangsql_cli PRIVATE libagents::libagents fastmcpp_core)
+    target_include_directories(clangsql_cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
+    )
 endif()
 
 # Add HTTP server support
 if(CLANGSQL_WITH_HTTP)
     target_compile_definitions(clangsql_cli PRIVATE CLANGSQL_HAS_HTTP)
+    target_sources(clangsql_cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+    )
+    # Ensure common headers are available (may already be added by agent support)
+    target_include_directories(clangsql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 endif()
 
 # Install CLI

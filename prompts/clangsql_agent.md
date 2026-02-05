@@ -631,3 +631,63 @@ clangsql main.cpp --server 13337 --token mysecret
 clangsql --remote localhost:13337 -q "SELECT name FROM functions LIMIT 5"
 clangsql --remote localhost:13337 -i
 ```
+
+---
+
+### MCP Server (Model Context Protocol)
+
+Start an MCP server for integration with Claude Desktop and other MCP clients.
+
+**Starting from the REPL:**
+```
+clangsql> .mcp start
+MCP server started on port 9042
+SSE endpoint: http://127.0.0.1:9042/sse
+
+Available tools:
+  clangsql_query  - Execute SQL query directly
+  clangsql_agent  - Ask natural language question (AI-powered)
+```
+
+**REPL Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.mcp` | Show status or start if not running |
+| `.mcp start` | Start MCP server on random port |
+| `.mcp stop` | Stop MCP server |
+| `.mcp help` | Show MCP help |
+
+**Claude Desktop Configuration:**
+```json
+{
+  "mcpServers": {
+    "clangsql": {
+      "url": "http://127.0.0.1:<port>/sse"
+    }
+  }
+}
+```
+
+---
+
+### Dynamic HTTP Server (from REPL)
+
+Start/stop the HTTP server dynamically from the agent REPL:
+
+```
+clangsql> .http start
+HTTP server started on port 8142
+URL: http://127.0.0.1:8142
+```
+
+**REPL Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.http` | Show status or start if not running |
+| `.http start` | Start HTTP server on random port |
+| `.http stop` | Stop HTTP server |
+| `.http help` | Show HTTP help |
+
+Press Ctrl+C to stop the server and return to the REPL.

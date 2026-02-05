@@ -141,6 +141,84 @@ clangsql --remote localhost:17198 -q "SELECT name FROM functions"
 clangsql --remote localhost:17198 -i
 ```
 
+## HTTP REST API
+
+Start an HTTP server for REST-based querying:
+
+```bash
+# Start HTTP server at launch
+clangsql main.cpp --http 8080
+
+# Or dynamically from the agent REPL
+clangsql main.cpp --agent -i
+clangsql> .http start
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Welcome message |
+| `/help` | GET | API documentation |
+| `/status` | GET | Health check |
+| `/query` | POST | Execute SQL (body = raw SQL) |
+| `/shutdown` | POST | Graceful shutdown |
+
+### Response Format
+
+```json
+{"success": true, "columns": [...], "rows": [[...]], "row_count": N}
+```
+
+### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `.http` | Show status or start if not running |
+| `.http start` | Start HTTP server on random port |
+| `.http stop` | Stop HTTP server |
+| `.http help` | Show HTTP help |
+
+## MCP Server
+
+Start an MCP (Model Context Protocol) server for integration with Claude Desktop and other MCP clients:
+
+```bash
+# From the agent REPL
+clangsql main.cpp --agent -i
+clangsql> .mcp start
+```
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `clangsql_query` | Execute SQL query directly |
+| `clangsql_agent` | Ask natural language question (AI-powered) |
+
+### Claude Desktop Integration
+
+Add to your Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "clangsql": {
+      "url": "http://127.0.0.1:<port>/sse"
+    }
+  }
+}
+```
+
+### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `.mcp` | Show status or start if not running |
+| `.mcp start` | Start MCP server on random port |
+| `.mcp stop` | Stop MCP server |
+| `.mcp help` | Show MCP help |
+
 ## Example Queries
 
 ### Call Graph Analysis
