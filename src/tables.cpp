@@ -7,12 +7,13 @@
 #include <xsql/database.hpp>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <algorithm>
 
 namespace clangsql {
 
 // ============================================================================
-// Shared File Map (used by all table builders)
+// Shared ID Maps (used by all table builders for consistent foreign keys)
 // ============================================================================
 
 /// Shared file path to ID mapping
@@ -48,19 +49,45 @@ public:
     }
 };
 
+/// Shared USR to ID mapping for classes, functions, enums
+/// Built once and shared across all table builders for consistent foreign keys
+class EntityMap {
+public:
+    std::unordered_map<std::string, int64_t> class_usr_to_id;
+    std::unordered_map<std::string, int64_t> func_usr_to_id;
+    std::unordered_map<std::string, int64_t> enum_usr_to_id;
+
+    int64_t get_class_id(const std::string& usr) const {
+        auto it = class_usr_to_id.find(usr);
+        return (it != class_usr_to_id.end()) ? it->second : 0;
+    }
+
+    int64_t get_func_id(const std::string& usr) const {
+        auto it = func_usr_to_id.find(usr);
+        return (it != func_usr_to_id.end()) ? it->second : 0;
+    }
+
+    int64_t get_enum_id(const std::string& usr) const {
+        auto it = enum_usr_to_id.find(usr);
+        return (it != enum_usr_to_id.end()) ? it->second : 0;
+    }
+};
+
 // Forward declarations for _with_map variants
 static FileMap build_file_map(const TranslationUnit& tu);
+static EntityMap build_entity_map(const TranslationUnit& tu);
 std::vector<FileRow> build_files_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map);
-std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map);
+std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
+std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const FileMap& map);
 std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUnit& tu, const FileMap& map);
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities);
 
 // ============================================================================
 // AST Traversal Helpers
@@ -175,7 +202,7 @@ SourceRange get_definition_extent(CXCursor cursor) {
 } // anonymous namespace
 
 // ============================================================================
-// Build FileMap (must be called first)
+// Build FileMap and EntityMap (must be called first)
 // ============================================================================
 
 static FileMap build_file_map(const TranslationUnit& tu) {
@@ -199,6 +226,55 @@ static FileMap build_file_map(const TranslationUnit& tu) {
             map.path_to_id[loc.filename] = next_id++;
             seen.insert(loc.filename);
         }
+        return CXChildVisit_Recurse;
+    });
+
+    return map;
+}
+
+/// Build shared entity map for classes, functions, and enums
+/// This ensures consistent IDs across all tables that reference these entities
+static EntityMap build_entity_map(const TranslationUnit& tu) {
+    EntityMap map;
+    int64_t next_class_id = 1;
+    int64_t next_func_id = 1;
+    int64_t next_enum_id = 1;
+
+    CXCursor root = tu.cursor();
+
+    // Single pass to collect all entities with consistent IDs
+    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+        std::string usr = cursor_usr(cursor);
+
+        if (usr.empty()) {
+            return CXChildVisit_Recurse;
+        }
+
+        // Classes, structs, unions
+        if (kind == CXCursor_ClassDecl ||
+            kind == CXCursor_StructDecl ||
+            kind == CXCursor_UnionDecl) {
+            if (map.class_usr_to_id.find(usr) == map.class_usr_to_id.end()) {
+                map.class_usr_to_id[usr] = next_class_id++;
+            }
+        }
+        // Functions and methods
+        else if (kind == CXCursor_FunctionDecl ||
+                 kind == CXCursor_CXXMethod ||
+                 kind == CXCursor_Constructor ||
+                 kind == CXCursor_Destructor) {
+            if (map.func_usr_to_id.find(usr) == map.func_usr_to_id.end()) {
+                map.func_usr_to_id[usr] = next_func_id++;
+            }
+        }
+        // Enums
+        else if (kind == CXCursor_EnumDecl) {
+            if (map.enum_usr_to_id.find(usr) == map.enum_usr_to_id.end()) {
+                map.enum_usr_to_id[usr] = next_enum_id++;
+            }
+        }
+
         return CXChildVisit_Recurse;
     });
 
@@ -241,12 +317,12 @@ std::vector<FileRow> build_files_table_with_map(const TranslationUnit& tu, const
 
 std::vector<FunctionRow> build_functions_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_functions_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_functions_table_with_map(tu, map, entities);
 }
 
-std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<FunctionRow> functions;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -258,12 +334,18 @@ std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& t
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_func_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
         auto extent = get_definition_extent(cursor);  // Includes body for definitions
 
         FunctionRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -298,12 +380,12 @@ std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& t
 
 std::vector<ClassRow> build_classes_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_classes_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_classes_table_with_map(tu, map, entities);
 }
 
-std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<ClassRow> classes;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -317,11 +399,17 @@ std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, co
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_class_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
 
         ClassRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -349,31 +437,17 @@ std::vector<ClassRow> build_classes_table_with_map(const TranslationUnit& tu, co
 
 std::vector<MethodRow> build_methods_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_methods_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_methods_table_with_map(tu, map, entities);
 }
 
-std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<MethodRow> methods;
-    std::unordered_map<std::string, int64_t> class_usr_to_id;
     int64_t next_id = 1;
 
-    // First pass: collect class USRs
     CXCursor root = tu.cursor();
-    int64_t class_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_ClassDecl ||
-            kind == CXCursor_StructDecl ||
-            kind == CXCursor_UnionDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (class_usr_to_id.find(usr) == class_usr_to_id.end()) {
-                class_usr_to_id[usr] = class_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
 
-    // Second pass: collect methods
+    // Collect methods using shared EntityMap for class_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -386,9 +460,9 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
         // Get parent class
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = class_usr_to_id.find(parent_usr);
-        if (it == class_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t class_id = entities.get_class_id(parent_usr);
+        if (class_id == 0) {
+            return CXChildVisit_Recurse;  // Parent class not in entity map
         }
 
         auto loc = cursor_location(cursor);
@@ -397,7 +471,7 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
         MethodRow row;
         row.id = next_id++;
         row.usr = cursor_usr(cursor);
-        row.class_id = it->second;
+        row.class_id = class_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -433,32 +507,17 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
 
 std::vector<FieldRow> build_fields_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_fields_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_fields_table_with_map(tu, map, entities);
 }
 
-std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<FieldRow> fields;
-    std::unordered_map<std::string, int64_t> class_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect class USRs
-    int64_t class_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_ClassDecl ||
-            kind == CXCursor_StructDecl ||
-            kind == CXCursor_UnionDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (class_usr_to_id.find(usr) == class_usr_to_id.end()) {
-                class_usr_to_id[usr] = class_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect fields
+    // Collect fields using shared EntityMap for class_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -469,14 +528,14 @@ std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, con
         // Get parent class
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = class_usr_to_id.find(parent_usr);
-        if (it == class_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t class_id = entities.get_class_id(parent_usr);
+        if (class_id == 0) {
+            return CXChildVisit_Recurse;  // Parent class not in entity map
         }
 
         FieldRow row;
         row.id = next_id++;
-        row.class_id = it->second;
+        row.class_id = class_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.type = cursor_type_spelling(cursor);
         row.access = access_string(clang_getCXXAccessSpecifier(cursor));
@@ -500,33 +559,17 @@ std::vector<FieldRow> build_fields_table_with_map(const TranslationUnit& tu, con
 
 std::vector<VariableRow> build_variables_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_variables_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_variables_table_with_map(tu, map, entities);
 }
 
-std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<VariableRow> variables;
-    std::unordered_map<std::string, int64_t> func_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect function USRs
-    int64_t func_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_FunctionDecl ||
-            kind == CXCursor_CXXMethod ||
-            kind == CXCursor_Constructor ||
-            kind == CXCursor_Destructor) {
-            std::string usr = cursor_usr(cursor);
-            if (func_usr_to_id.find(usr) == func_usr_to_id.end()) {
-                func_usr_to_id[usr] = func_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect variables
+    // Collect variables using shared EntityMap for function_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -552,10 +595,9 @@ std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& t
             parent_kind == CXCursor_CXXMethod ||
             parent_kind == CXCursor_Constructor ||
             parent_kind == CXCursor_Destructor) {
-            // Local variable
+            // Local variable - use shared ID from EntityMap
             std::string parent_usr = cursor_usr(parent);
-            auto it = func_usr_to_id.find(parent_usr);
-            row.function_id = (it != func_usr_to_id.end()) ? it->second : 0;
+            row.function_id = entities.get_func_id(parent_usr);
 
             CX_StorageClass storage = clang_Cursor_getStorageClass(cursor);
             row.scope_kind = (storage == CX_SC_Static) ? "static_local" : "local";
@@ -591,33 +633,17 @@ std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& t
 
 std::vector<ParameterRow> build_parameters_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_parameters_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_parameters_table_with_map(tu, map, entities);
 }
 
-std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<ParameterRow> parameters;
-    std::unordered_map<std::string, int64_t> func_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect function USRs
-    int64_t func_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        CXCursorKind kind = clang_getCursorKind(cursor);
-        if (kind == CXCursor_FunctionDecl ||
-            kind == CXCursor_CXXMethod ||
-            kind == CXCursor_Constructor ||
-            kind == CXCursor_Destructor) {
-            std::string usr = cursor_usr(cursor);
-            if (func_usr_to_id.find(usr) == func_usr_to_id.end()) {
-                func_usr_to_id[usr] = func_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect parameters
+    // Collect parameters using shared EntityMap for function_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -628,14 +654,14 @@ std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit&
         // Get parent function
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = func_usr_to_id.find(parent_usr);
-        if (it == func_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t function_id = entities.get_func_id(parent_usr);
+        if (function_id == 0) {
+            return CXChildVisit_Recurse;  // Parent function not in entity map
         }
 
         ParameterRow row;
         row.id = next_id++;
-        row.function_id = it->second;
+        row.function_id = function_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.type = cursor_type_spelling(cursor);
 
@@ -674,12 +700,12 @@ std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit&
 
 std::vector<EnumRow> build_enums_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_enums_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_enums_table_with_map(tu, map, entities);
 }
 
-std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<EnumRow> enums;
-    int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
@@ -690,11 +716,17 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
             return CXChildVisit_Recurse;
         }
 
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_enum_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map
+        }
+
         auto loc = cursor_location(cursor);
 
         EnumRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
+        row.id = id;  // Use shared ID from EntityMap
+        row.usr = usr;
         row.name = cursor_spelling(cursor);
 
         // Get underlying type
@@ -718,29 +750,17 @@ std::vector<EnumRow> build_enums_table_with_map(const TranslationUnit& tu, const
 
 std::vector<EnumValueRow> build_enum_values_table(const TranslationUnit& tu) {
     FileMap map = build_file_map(tu);
-    return build_enum_values_table_with_map(tu, map);
+    EntityMap entities = build_entity_map(tu);
+    return build_enum_values_table_with_map(tu, map, entities);
 }
 
-std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map) {
+std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<EnumValueRow> values;
-    std::unordered_map<std::string, int64_t> enum_usr_to_id;
     int64_t next_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // First pass: collect enum USRs
-    int64_t enum_id = 1;
-    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
-        if (clang_getCursorKind(cursor) == CXCursor_EnumDecl) {
-            std::string usr = cursor_usr(cursor);
-            if (enum_usr_to_id.find(usr) == enum_usr_to_id.end()) {
-                enum_usr_to_id[usr] = enum_id++;
-            }
-        }
-        return CXChildVisit_Recurse;
-    });
-
-    // Second pass: collect enum values
+    // Collect enum values using shared EntityMap for enum_id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         if (clang_getCursorKind(cursor) != CXCursor_EnumConstantDecl) {
             return CXChildVisit_Recurse;
@@ -749,14 +769,14 @@ std::vector<EnumValueRow> build_enum_values_table_with_map(const TranslationUnit
         // Get parent enum
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        auto it = enum_usr_to_id.find(parent_usr);
-        if (it == enum_usr_to_id.end()) {
-            return CXChildVisit_Recurse;
+        int64_t enum_id = entities.get_enum_id(parent_usr);
+        if (enum_id == 0) {
+            return CXChildVisit_Recurse;  // Parent enum not in entity map
         }
 
         EnumValueRow row;
         row.id = next_id++;
-        row.enum_id = it->second;
+        row.enum_id = enum_id;  // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.value = clang_getEnumConstantDeclValue(cursor);
         row.is_system = is_in_system_header(cursor);
@@ -828,6 +848,7 @@ std::vector<CallRow> build_calls_table_with_map(const TranslationUnit& tu, const
             row.caller_usr = caller_usr;
             row.callee_usr = cursor_usr(callee);
             row.callee_name = cursor_spelling(callee);
+            row.file_id = map.get_id(loc.filename);
             row.line = loc.line;
             row.column = loc.column;
 
@@ -881,6 +902,8 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
             CXType base_type = clang_getCursorType(child);
             CXCursor base_class = clang_getTypeDeclaration(base_type);
 
+            auto loc = cursor_location(class_cursor);
+
             InheritanceRow row;
             row.id = next_id++;
             row.derived_usr = derived_usr;
@@ -890,6 +913,9 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
 
             // Get access specifier
             row.access = access_string(clang_getCXXAccessSpecifier(child));
+
+            // Get file info
+            row.file_id = map.get_id(loc.filename);
 
             // Check for virtual inheritance
             row.is_virtual = clang_isVirtualBase(child) != 0;
@@ -907,27 +933,202 @@ std::vector<InheritanceRow> build_inheritance_table_with_map(const TranslationUn
     return inheritance;
 }
 
+std::vector<StringLiteralRow> build_string_literals_table(const TranslationUnit& tu) {
+    FileMap map = build_file_map(tu);
+    EntityMap entities = build_entity_map(tu);
+    return build_string_literals_table_with_map(tu, map, entities);
+}
+
+std::vector<StringLiteralRow> build_string_literals_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
+    std::vector<StringLiteralRow> strings;
+    int64_t next_id = 1;
+
+    CXCursor root = tu.cursor();
+
+    // Context for tracking enclosing function
+    struct VisitorContext {
+        std::vector<StringLiteralRow>& strings;
+        const FileMap& map;
+        const EntityMap& entities;
+        int64_t& next_id;
+        std::string current_func_usr;  // USR of enclosing function (empty if global)
+        int64_t current_func_id;       // ID of enclosing function (0 if global)
+    };
+
+    VisitorContext ctx{strings, map, entities, next_id, "", 0};
+
+    // Recursive visitor that tracks function context
+    std::function<CXChildVisitResult(CXCursor, CXCursor, VisitorContext&)> visit_recursive;
+    visit_recursive = [&visit_recursive](CXCursor cursor, CXCursor, VisitorContext& ctx) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+
+        // Track enclosing function
+        std::string saved_func_usr = ctx.current_func_usr;
+        if (kind == CXCursor_FunctionDecl ||
+            kind == CXCursor_CXXMethod ||
+            kind == CXCursor_Constructor ||
+            kind == CXCursor_Destructor) {
+            if (is_definition(cursor)) {
+                ctx.current_func_usr = cursor_usr(cursor);
+            }
+        }
+
+        // Capture string literals
+        if (kind == CXCursor_StringLiteral) {
+            auto loc = cursor_location(cursor);
+
+            StringLiteralRow row;
+            row.id = ctx.next_id++;
+            row.file_id = ctx.map.get_id(loc.filename);
+            row.line = loc.line;
+            row.column = loc.column;
+            row.function_usr = ctx.current_func_usr;
+            row.is_system = is_in_system_header(cursor);
+
+            // Get the string content
+            // Note: clang_getCursorSpelling returns the literal as written (with quotes)
+            std::string literal = cursor_spelling(cursor);
+
+            // Check for wide string (L"...")
+            row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+            // Extract content (remove quotes and prefix)
+            if (!literal.empty()) {
+                size_t start = literal.find('"');
+                size_t end = literal.rfind('"');
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    row.content = literal.substr(start + 1, end - start - 1);
+                } else {
+                    row.content = literal;
+                }
+            }
+
+            ctx.strings.push_back(row);
+        }
+
+        // Visit children
+        clang_visitChildren(cursor,
+            [](CXCursor child, CXCursor parent, CXClientData data) -> CXChildVisitResult {
+                auto& ctx = *static_cast<VisitorContext*>(data);
+                // Call our recursive function
+                std::function<CXChildVisitResult(CXCursor, CXCursor, VisitorContext&)>* fn = nullptr;
+                // We need to access the outer function - use a different approach
+                return CXChildVisit_Recurse;  // Let clang handle recursion
+            },
+            &ctx);
+
+        // Restore function context
+        ctx.current_func_usr = saved_func_usr;
+
+        return CXChildVisit_Recurse;
+    };
+
+    // Start visiting from root
+    visit_children(root, [&](CXCursor cursor, CXCursor parent) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+
+        // Track enclosing function
+        if (kind == CXCursor_FunctionDecl ||
+            kind == CXCursor_CXXMethod ||
+            kind == CXCursor_Constructor ||
+            kind == CXCursor_Destructor) {
+            if (is_definition(cursor)) {
+                std::string func_usr = cursor_usr(cursor);
+                int64_t func_id = entities.get_func_id(func_usr);
+
+                // Visit this function's children to find string literals
+                visit_children(cursor, [&](CXCursor child, CXCursor) -> CXChildVisitResult {
+                    if (clang_getCursorKind(child) == CXCursor_StringLiteral) {
+                        auto loc = cursor_location(child);
+
+                        StringLiteralRow row;
+                        row.id = next_id++;
+                        row.file_id = map.get_id(loc.filename);
+                        row.line = loc.line;
+                        row.column = loc.column;
+                        row.function_usr = func_usr;
+                        row.func_id = func_id;
+                        row.is_system = is_in_system_header(child);
+
+                        // Get the string content
+                        std::string literal = cursor_spelling(child);
+                        row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+                        // Extract content (remove quotes and prefix)
+                        if (!literal.empty()) {
+                            size_t start = literal.find('"');
+                            size_t end = literal.rfind('"');
+                            if (start != std::string::npos && end != std::string::npos && end > start) {
+                                row.content = literal.substr(start + 1, end - start - 1);
+                            } else {
+                                row.content = literal;
+                            }
+                        }
+
+                        strings.push_back(row);
+                    }
+                    return CXChildVisit_Recurse;
+                });
+            }
+        }
+        // Also capture global string literals (outside functions)
+        else if (kind == CXCursor_StringLiteral) {
+            auto loc = cursor_location(cursor);
+
+            StringLiteralRow row;
+            row.id = next_id++;
+            row.file_id = map.get_id(loc.filename);
+            row.line = loc.line;
+            row.column = loc.column;
+            row.function_usr = "";  // Global scope
+            row.func_id = 0;        // No enclosing function
+            row.is_system = is_in_system_header(cursor);
+
+            std::string literal = cursor_spelling(cursor);
+            row.is_wide = (!literal.empty() && literal[0] == 'L');
+
+            if (!literal.empty()) {
+                size_t start = literal.find('"');
+                size_t end = literal.rfind('"');
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    row.content = literal.substr(start + 1, end - start - 1);
+                } else {
+                    row.content = literal;
+                }
+            }
+
+            strings.push_back(row);
+        }
+
+        return CXChildVisit_Recurse;
+    });
+
+    return strings;
+}
+
 // ============================================================================
 // Virtual Table Registration
 // ============================================================================
 
 void register_tables(xsql::Database& db, const TranslationUnit& tu,
                      const std::string& schema) {
-    // Build shared file map ONCE
+    // Build shared maps ONCE for consistent IDs across all tables
     FileMap file_map = build_file_map(tu);
+    EntityMap entity_map = build_entity_map(tu);
 
     // Pre-build all table data (captures by value avoid dangling reference issues)
     auto files_data = std::make_shared<std::vector<FileRow>>(build_files_table_with_map(tu, file_map));
-    auto functions_data = std::make_shared<std::vector<FunctionRow>>(build_functions_table_with_map(tu, file_map));
-    auto classes_data = std::make_shared<std::vector<ClassRow>>(build_classes_table_with_map(tu, file_map));
-    auto methods_data = std::make_shared<std::vector<MethodRow>>(build_methods_table_with_map(tu, file_map));
-    auto fields_data = std::make_shared<std::vector<FieldRow>>(build_fields_table_with_map(tu, file_map));
-    auto variables_data = std::make_shared<std::vector<VariableRow>>(build_variables_table_with_map(tu, file_map));
-    auto parameters_data = std::make_shared<std::vector<ParameterRow>>(build_parameters_table_with_map(tu, file_map));
-    auto enums_data = std::make_shared<std::vector<EnumRow>>(build_enums_table_with_map(tu, file_map));
-    auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map));
+    auto functions_data = std::make_shared<std::vector<FunctionRow>>(build_functions_table_with_map(tu, file_map, entity_map));
+    auto classes_data = std::make_shared<std::vector<ClassRow>>(build_classes_table_with_map(tu, file_map, entity_map));
+    auto methods_data = std::make_shared<std::vector<MethodRow>>(build_methods_table_with_map(tu, file_map, entity_map));
+    auto fields_data = std::make_shared<std::vector<FieldRow>>(build_fields_table_with_map(tu, file_map, entity_map));
+    auto variables_data = std::make_shared<std::vector<VariableRow>>(build_variables_table_with_map(tu, file_map, entity_map));
+    auto parameters_data = std::make_shared<std::vector<ParameterRow>>(build_parameters_table_with_map(tu, file_map, entity_map));
+    auto enums_data = std::make_shared<std::vector<EnumRow>>(build_enums_table_with_map(tu, file_map, entity_map));
+    auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>(build_enum_values_table_with_map(tu, file_map, entity_map));
     auto calls_data = std::make_shared<std::vector<CallRow>>(build_calls_table_with_map(tu, file_map));
     auto inheritance_data = std::make_shared<std::vector<InheritanceRow>>(build_inheritance_table_with_map(tu, file_map));
+    auto string_literals_data = std::make_shared<std::vector<StringLiteralRow>>(build_string_literals_table_with_map(tu, file_map, entity_map));
 
     // Use schema as table name prefix (e.g., "main" -> "main_functions")
     // Empty schema means no prefix (backward compatible)
@@ -1107,6 +1308,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_text("caller_usr", [](const CallRow& r) { return r.caller_usr; })
         .column_text("callee_usr", [](const CallRow& r) { return r.callee_usr; })
         .column_text("callee_name", [](const CallRow& r) { return r.callee_name; })
+        .column_int64("file_id", [](const CallRow& r) { return r.file_id; })
         .column_int("line", [](const CallRow& r) { return static_cast<int>(r.line); })
         .column_int("column", [](const CallRow& r) { return static_cast<int>(r.column); })
         .column_int("is_virtual", [](const CallRow& r) { return r.is_virtual ? 1 : 0; })
@@ -1125,10 +1327,408 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_text("base_usr", [](const InheritanceRow& r) { return r.base_usr; })
         .column_text("base_name", [](const InheritanceRow& r) { return r.base_name; })
         .column_text("access", [](const InheritanceRow& r) { return r.access; })
+        .column_int64("file_id", [](const InheritanceRow& r) { return r.file_id; })
         .column_int("is_virtual", [](const InheritanceRow& r) { return r.is_virtual ? 1 : 0; })
         .column_int("is_system", [](const InheritanceRow& r) { return r.is_system ? 1 : 0; })
         .build();
     db.register_and_create_cached_table(inheritance_def);
+
+    // String literals table
+    auto string_literals_def = xsql::cached_table<StringLiteralRow>((prefix + "string_literals").c_str())
+        .cache_builder([string_literals_data](std::vector<StringLiteralRow>& cache) {
+            cache = *string_literals_data;
+        })
+        .column_int64("id", [](const StringLiteralRow& r) { return r.id; })
+        .column_text("content", [](const StringLiteralRow& r) { return r.content; })
+        .column_int64("file_id", [](const StringLiteralRow& r) { return r.file_id; })
+        .column_int("line", [](const StringLiteralRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
+        .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
+        .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
+        .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
+        .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(string_literals_def);
+}
+
+// ============================================================================
+// Project Mode - Multiple TU Registration
+// ============================================================================
+
+void register_project_tables(xsql::Database& db,
+                             const std::vector<const TranslationUnit*>& tus,
+                             const std::string& schema) {
+    // Build combined row data from all TUs
+    // Each TU is processed with its own file_map/entity_map, but we deduplicate
+    // the results based on USR (for entities) or path (for files)
+    auto files_data = std::make_shared<std::vector<FileRow>>();
+    auto functions_data = std::make_shared<std::vector<FunctionRow>>();
+    auto classes_data = std::make_shared<std::vector<ClassRow>>();
+    auto methods_data = std::make_shared<std::vector<MethodRow>>();
+    auto fields_data = std::make_shared<std::vector<FieldRow>>();
+    auto variables_data = std::make_shared<std::vector<VariableRow>>();
+    auto parameters_data = std::make_shared<std::vector<ParameterRow>>();
+    auto enums_data = std::make_shared<std::vector<EnumRow>>();
+    auto enum_values_data = std::make_shared<std::vector<EnumValueRow>>();
+    auto calls_data = std::make_shared<std::vector<CallRow>>();
+    auto inheritance_data = std::make_shared<std::vector<InheritanceRow>>();
+    auto string_literals_data = std::make_shared<std::vector<StringLiteralRow>>();
+
+    // Track seen items for deduplication
+    std::set<std::string> seen_files;
+    std::set<std::string> seen_functions;  // by USR
+    std::set<std::string> seen_classes;    // by USR
+    std::set<std::string> seen_methods;    // by USR
+    std::set<std::string> seen_variables;  // by USR
+    std::set<std::string> seen_enums;      // by USR
+    std::set<std::string> seen_inheritance; // by derived_usr:base_usr
+
+    for (const auto* tu : tus) {
+        if (!tu) continue;
+
+        // Build maps for this TU
+        FileMap file_map = build_file_map(*tu);
+        EntityMap entity_map = build_entity_map(*tu);
+
+        // Files (deduplicate by path)
+        auto tu_files = build_files_table_with_map(*tu, file_map);
+        for (auto& row : tu_files) {
+            if (seen_files.find(row.path) == seen_files.end()) {
+                seen_files.insert(row.path);
+                files_data->push_back(std::move(row));
+            }
+        }
+
+        // Functions (deduplicate by USR)
+        auto tu_functions = build_functions_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_functions) {
+            if (row.usr.empty() || seen_functions.find(row.usr) == seen_functions.end()) {
+                if (!row.usr.empty()) seen_functions.insert(row.usr);
+                functions_data->push_back(std::move(row));
+            }
+        }
+
+        // Classes (deduplicate by USR)
+        auto tu_classes = build_classes_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_classes) {
+            if (row.usr.empty() || seen_classes.find(row.usr) == seen_classes.end()) {
+                if (!row.usr.empty()) seen_classes.insert(row.usr);
+                classes_data->push_back(std::move(row));
+            }
+        }
+
+        // Methods (deduplicate by USR)
+        auto tu_methods = build_methods_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_methods) {
+            if (row.usr.empty() || seen_methods.find(row.usr) == seen_methods.end()) {
+                if (!row.usr.empty()) seen_methods.insert(row.usr);
+                methods_data->push_back(std::move(row));
+            }
+        }
+
+        // Fields (keep all - they're tied to classes)
+        auto tu_fields = build_fields_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_fields) {
+            fields_data->push_back(std::move(row));
+        }
+
+        // Variables (deduplicate by USR)
+        auto tu_variables = build_variables_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_variables) {
+            if (row.usr.empty() || seen_variables.find(row.usr) == seen_variables.end()) {
+                if (!row.usr.empty()) seen_variables.insert(row.usr);
+                variables_data->push_back(std::move(row));
+            }
+        }
+
+        // Parameters (keep all - they're tied to functions)
+        auto tu_parameters = build_parameters_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_parameters) {
+            parameters_data->push_back(std::move(row));
+        }
+
+        // Enums (deduplicate by USR)
+        auto tu_enums = build_enums_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_enums) {
+            if (row.usr.empty() || seen_enums.find(row.usr) == seen_enums.end()) {
+                if (!row.usr.empty()) seen_enums.insert(row.usr);
+                enums_data->push_back(std::move(row));
+            }
+        }
+
+        // Enum values (keep all - they're tied to enums)
+        auto tu_enum_values = build_enum_values_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_enum_values) {
+            enum_values_data->push_back(std::move(row));
+        }
+
+        // Calls (keep all - each call site is unique)
+        auto tu_calls = build_calls_table_with_map(*tu, file_map);
+        for (auto& row : tu_calls) {
+            calls_data->push_back(std::move(row));
+        }
+
+        // Inheritance (deduplicate by derived_usr:base_usr pair)
+        auto tu_inheritance = build_inheritance_table_with_map(*tu, file_map);
+        for (auto& row : tu_inheritance) {
+            std::string key = row.derived_usr + ":" + row.base_usr;
+            if (seen_inheritance.find(key) == seen_inheritance.end()) {
+                seen_inheritance.insert(key);
+                inheritance_data->push_back(std::move(row));
+            }
+        }
+
+        // String literals (keep all - each occurrence is unique)
+        auto tu_strings = build_string_literals_table_with_map(*tu, file_map, entity_map);
+        for (auto& row : tu_strings) {
+            string_literals_data->push_back(std::move(row));
+        }
+    }
+
+    // Re-assign IDs to ensure they're sequential
+    int64_t id = 1;
+    for (auto& row : *files_data) row.id = id++;
+    id = 1;
+    for (auto& row : *functions_data) row.id = id++;
+    id = 1;
+    for (auto& row : *classes_data) row.id = id++;
+    id = 1;
+    for (auto& row : *methods_data) row.id = id++;
+    id = 1;
+    for (auto& row : *fields_data) row.id = id++;
+    id = 1;
+    for (auto& row : *variables_data) row.id = id++;
+    id = 1;
+    for (auto& row : *parameters_data) row.id = id++;
+    id = 1;
+    for (auto& row : *enums_data) row.id = id++;
+    id = 1;
+    for (auto& row : *enum_values_data) row.id = id++;
+    id = 1;
+    for (auto& row : *calls_data) row.id = id++;
+    id = 1;
+    for (auto& row : *inheritance_data) row.id = id++;
+    id = 1;
+    for (auto& row : *string_literals_data) row.id = id++;
+
+    // Register tables (same as single TU, but with combined data)
+    std::string prefix = schema.empty() ? "" : schema + "_";
+
+    // Files table
+    auto files_def = xsql::cached_table<FileRow>((prefix + "files").c_str())
+        .cache_builder([files_data](std::vector<FileRow>& cache) {
+            cache = *files_data;
+        })
+        .column_int64("id", [](const FileRow& r) { return r.id; })
+        .column_text("path", [](const FileRow& r) { return r.path; })
+        .column_int("is_main_file", [](const FileRow& r) { return r.is_main_file ? 1 : 0; })
+        .column_int64("mtime", [](const FileRow& r) { return static_cast<int64_t>(r.mtime); })
+        .column_int("is_header", [](const FileRow& r) { return r.is_header ? 1 : 0; })
+        .column_int("is_system", [](const FileRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(files_def);
+
+    // Functions table
+    auto functions_def = xsql::cached_table<FunctionRow>((prefix + "functions").c_str())
+        .cache_builder([functions_data](std::vector<FunctionRow>& cache) {
+            cache = *functions_data;
+        })
+        .column_int64("id", [](const FunctionRow& r) { return r.id; })
+        .column_text("usr", [](const FunctionRow& r) { return r.usr; })
+        .column_text("name", [](const FunctionRow& r) { return r.name; })
+        .column_text("qualified_name", [](const FunctionRow& r) { return r.qualified_name; })
+        .column_text("return_type", [](const FunctionRow& r) { return r.return_type; })
+        .column_int64("file_id", [](const FunctionRow& r) { return r.file_id; })
+        .column_int("line", [](const FunctionRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const FunctionRow& r) { return static_cast<int>(r.column); })
+        .column_int("end_line", [](const FunctionRow& r) { return static_cast<int>(r.end_line); })
+        .column_int("end_column", [](const FunctionRow& r) { return static_cast<int>(r.end_column); })
+        .column_int("is_definition", [](const FunctionRow& r) { return r.is_definition ? 1 : 0; })
+        .column_int("is_inline", [](const FunctionRow& r) { return r.is_inline ? 1 : 0; })
+        .column_int("is_variadic", [](const FunctionRow& r) { return r.is_variadic ? 1 : 0; })
+        .column_int("is_static", [](const FunctionRow& r) { return r.is_static ? 1 : 0; })
+        .column_int("is_system", [](const FunctionRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(functions_def);
+
+    // Classes table
+    auto classes_def = xsql::cached_table<ClassRow>((prefix + "classes").c_str())
+        .cache_builder([classes_data](std::vector<ClassRow>& cache) {
+            cache = *classes_data;
+        })
+        .column_int64("id", [](const ClassRow& r) { return r.id; })
+        .column_text("usr", [](const ClassRow& r) { return r.usr; })
+        .column_text("name", [](const ClassRow& r) { return r.name; })
+        .column_text("qualified_name", [](const ClassRow& r) { return r.qualified_name; })
+        .column_text("kind", [](const ClassRow& r) { return r.kind; })
+        .column_int64("file_id", [](const ClassRow& r) { return r.file_id; })
+        .column_int("line", [](const ClassRow& r) { return static_cast<int>(r.line); })
+        .column_int("is_definition", [](const ClassRow& r) { return r.is_definition ? 1 : 0; })
+        .column_int("is_abstract", [](const ClassRow& r) { return r.is_abstract ? 1 : 0; })
+        .column_int64("namespace_id", [](const ClassRow& r) { return r.namespace_id; })
+        .column_int("is_system", [](const ClassRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(classes_def);
+
+    // Methods table
+    auto methods_def = xsql::cached_table<MethodRow>((prefix + "methods").c_str())
+        .cache_builder([methods_data](std::vector<MethodRow>& cache) {
+            cache = *methods_data;
+        })
+        .column_int64("id", [](const MethodRow& r) { return r.id; })
+        .column_text("usr", [](const MethodRow& r) { return r.usr; })
+        .column_int64("class_id", [](const MethodRow& r) { return r.class_id; })
+        .column_text("name", [](const MethodRow& r) { return r.name; })
+        .column_text("qualified_name", [](const MethodRow& r) { return r.qualified_name; })
+        .column_text("return_type", [](const MethodRow& r) { return r.return_type; })
+        .column_text("access", [](const MethodRow& r) { return r.access; })
+        .column_int("is_virtual", [](const MethodRow& r) { return r.is_virtual ? 1 : 0; })
+        .column_int("is_pure_virtual", [](const MethodRow& r) { return r.is_pure_virtual ? 1 : 0; })
+        .column_int("is_static", [](const MethodRow& r) { return r.is_static ? 1 : 0; })
+        .column_int("is_const", [](const MethodRow& r) { return r.is_const ? 1 : 0; })
+        .column_int("is_override", [](const MethodRow& r) { return r.is_override ? 1 : 0; })
+        .column_int("is_final", [](const MethodRow& r) { return r.is_final ? 1 : 0; })
+        .column_int("line", [](const MethodRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const MethodRow& r) { return static_cast<int>(r.column); })
+        .column_int("end_line", [](const MethodRow& r) { return static_cast<int>(r.end_line); })
+        .column_int("end_column", [](const MethodRow& r) { return static_cast<int>(r.end_column); })
+        .column_int("is_system", [](const MethodRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(methods_def);
+
+    // Fields table
+    auto fields_def = xsql::cached_table<FieldRow>((prefix + "fields").c_str())
+        .cache_builder([fields_data](std::vector<FieldRow>& cache) {
+            cache = *fields_data;
+        })
+        .column_int64("id", [](const FieldRow& r) { return r.id; })
+        .column_int64("class_id", [](const FieldRow& r) { return r.class_id; })
+        .column_text("name", [](const FieldRow& r) { return r.name; })
+        .column_text("type", [](const FieldRow& r) { return r.type; })
+        .column_text("access", [](const FieldRow& r) { return r.access; })
+        .column_int("is_static", [](const FieldRow& r) { return r.is_static ? 1 : 0; })
+        .column_int("is_mutable", [](const FieldRow& r) { return r.is_mutable ? 1 : 0; })
+        .column_int("bit_width", [](const FieldRow& r) { return r.bit_width; })
+        .column_int64("offset_bits", [](const FieldRow& r) { return r.offset_bits; })
+        .column_int("is_system", [](const FieldRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(fields_def);
+
+    // Variables table
+    auto variables_def = xsql::cached_table<VariableRow>((prefix + "variables").c_str())
+        .cache_builder([variables_data](std::vector<VariableRow>& cache) {
+            cache = *variables_data;
+        })
+        .column_int64("id", [](const VariableRow& r) { return r.id; })
+        .column_text("usr", [](const VariableRow& r) { return r.usr; })
+        .column_text("name", [](const VariableRow& r) { return r.name; })
+        .column_text("type", [](const VariableRow& r) { return r.type; })
+        .column_int64("file_id", [](const VariableRow& r) { return r.file_id; })
+        .column_int("line", [](const VariableRow& r) { return static_cast<int>(r.line); })
+        .column_int64("function_id", [](const VariableRow& r) { return r.function_id; })
+        .column_int64("namespace_id", [](const VariableRow& r) { return r.namespace_id; })
+        .column_text("scope_kind", [](const VariableRow& r) { return r.scope_kind; })
+        .column_text("storage_class", [](const VariableRow& r) { return r.storage_class; })
+        .column_int("is_const", [](const VariableRow& r) { return r.is_const ? 1 : 0; })
+        .column_int("is_inline", [](const VariableRow& r) { return r.is_inline ? 1 : 0; })
+        .column_int("is_system", [](const VariableRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(variables_def);
+
+    // Parameters table
+    auto parameters_def = xsql::cached_table<ParameterRow>((prefix + "parameters").c_str())
+        .cache_builder([parameters_data](std::vector<ParameterRow>& cache) {
+            cache = *parameters_data;
+        })
+        .column_int64("id", [](const ParameterRow& r) { return r.id; })
+        .column_int64("function_id", [](const ParameterRow& r) { return r.function_id; })
+        .column_text("name", [](const ParameterRow& r) { return r.name; })
+        .column_text("type", [](const ParameterRow& r) { return r.type; })
+        .column_int("index_", [](const ParameterRow& r) { return r.index; })
+        .column_int("has_default", [](const ParameterRow& r) { return r.has_default ? 1 : 0; })
+        .column_int("is_system", [](const ParameterRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(parameters_def);
+
+    // Enums table
+    auto enums_def = xsql::cached_table<EnumRow>((prefix + "enums").c_str())
+        .cache_builder([enums_data](std::vector<EnumRow>& cache) {
+            cache = *enums_data;
+        })
+        .column_int64("id", [](const EnumRow& r) { return r.id; })
+        .column_text("usr", [](const EnumRow& r) { return r.usr; })
+        .column_text("name", [](const EnumRow& r) { return r.name; })
+        .column_text("underlying_type", [](const EnumRow& r) { return r.underlying_type; })
+        .column_int("is_scoped", [](const EnumRow& r) { return r.is_scoped ? 1 : 0; })
+        .column_int64("file_id", [](const EnumRow& r) { return r.file_id; })
+        .column_int("line", [](const EnumRow& r) { return static_cast<int>(r.line); })
+        .column_int("is_system", [](const EnumRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(enums_def);
+
+    // Enum values table
+    auto enum_values_def = xsql::cached_table<EnumValueRow>((prefix + "enum_values").c_str())
+        .cache_builder([enum_values_data](std::vector<EnumValueRow>& cache) {
+            cache = *enum_values_data;
+        })
+        .column_int64("id", [](const EnumValueRow& r) { return r.id; })
+        .column_int64("enum_id", [](const EnumValueRow& r) { return r.enum_id; })
+        .column_text("name", [](const EnumValueRow& r) { return r.name; })
+        .column_int64("value", [](const EnumValueRow& r) { return r.value; })
+        .column_int("is_system", [](const EnumValueRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(enum_values_def);
+
+    // Calls table
+    auto calls_def = xsql::cached_table<CallRow>((prefix + "calls").c_str())
+        .cache_builder([calls_data](std::vector<CallRow>& cache) {
+            cache = *calls_data;
+        })
+        .column_int64("id", [](const CallRow& r) { return r.id; })
+        .column_text("caller_usr", [](const CallRow& r) { return r.caller_usr; })
+        .column_text("callee_usr", [](const CallRow& r) { return r.callee_usr; })
+        .column_text("callee_name", [](const CallRow& r) { return r.callee_name; })
+        .column_int64("file_id", [](const CallRow& r) { return r.file_id; })
+        .column_int("line", [](const CallRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const CallRow& r) { return static_cast<int>(r.column); })
+        .column_int("is_virtual", [](const CallRow& r) { return r.is_virtual ? 1 : 0; })
+        .column_int("is_system", [](const CallRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(calls_def);
+
+    // Inheritance table
+    auto inheritance_def = xsql::cached_table<InheritanceRow>((prefix + "inheritance").c_str())
+        .cache_builder([inheritance_data](std::vector<InheritanceRow>& cache) {
+            cache = *inheritance_data;
+        })
+        .column_int64("id", [](const InheritanceRow& r) { return r.id; })
+        .column_text("derived_usr", [](const InheritanceRow& r) { return r.derived_usr; })
+        .column_text("derived_name", [](const InheritanceRow& r) { return r.derived_name; })
+        .column_text("base_usr", [](const InheritanceRow& r) { return r.base_usr; })
+        .column_text("base_name", [](const InheritanceRow& r) { return r.base_name; })
+        .column_text("access", [](const InheritanceRow& r) { return r.access; })
+        .column_int64("file_id", [](const InheritanceRow& r) { return r.file_id; })
+        .column_int("is_virtual", [](const InheritanceRow& r) { return r.is_virtual ? 1 : 0; })
+        .column_int("is_system", [](const InheritanceRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(inheritance_def);
+
+    // String literals table
+    auto string_literals_def = xsql::cached_table<StringLiteralRow>((prefix + "string_literals").c_str())
+        .cache_builder([string_literals_data](std::vector<StringLiteralRow>& cache) {
+            cache = *string_literals_data;
+        })
+        .column_int64("id", [](const StringLiteralRow& r) { return r.id; })
+        .column_text("content", [](const StringLiteralRow& r) { return r.content; })
+        .column_int64("file_id", [](const StringLiteralRow& r) { return r.file_id; })
+        .column_int("line", [](const StringLiteralRow& r) { return static_cast<int>(r.line); })
+        .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
+        .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
+        .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
+        .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
+        .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
+        .build();
+    db.register_and_create_cached_table(string_literals_def);
 }
 
 } // namespace clangsql

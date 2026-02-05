@@ -195,15 +195,14 @@ void AIAgent::setup_tools() {
             std::string sql = j.value("query", "");
 
             if (verbose_) {
-                std::cerr << "[TOOL] Executing SQL: " << sql.substr(0, 80)
-                          << (sql.size() > 80 ? "..." : "") << std::endl;
+                std::cerr << "[TOOL] Executing SQL:\n" << sql << std::endl;
             }
 
             // This runs on the main thread (query_hosted guarantees this)
             std::string result = executor_(sql);
 
             if (verbose_) {
-                std::cerr << "[TOOL] Result: " << result.size() << " bytes" << std::endl;
+                std::cerr << "[TOOL] Result (" << result.size() << " bytes):\n" << result << std::endl;
             }
 
             return result;
@@ -243,7 +242,14 @@ std::string AIAgent::query(const std::string& prompt) {
     host.should_abort = [this]() { return quit_requested_.load(); };
 
     try {
-        return agent_->query_hosted(message, host);
+        std::string result = agent_->query_hosted(message, host);
+        if (verbose_) {
+            std::cerr << "[AGENT] query_hosted returned " << result.size() << " bytes" << std::endl;
+            if (result.empty()) {
+                std::cerr << "[AGENT] WARNING: Empty response from agent" << std::endl;
+            }
+        }
+        return result;
     } catch (const std::exception& e) {
         return std::string("Error: ") + e.what();
     }

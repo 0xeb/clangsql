@@ -47,11 +47,18 @@ Tables become prefixed: `a_functions`, `b_functions`. Use USR to correlate symbo
 ## CLI Usage
 
 ```bash
+# Basic usage
 clangsql main.cpp -e "SELECT name FROM functions"      # Single query
 clangsql main.cpp -i                                    # Interactive REPL
 clangsql main.cpp --server                              # Server mode
 clangsql --remote localhost:17198 -q "SELECT ..."      # Remote client
 clangsql main.cpp -- -std=c++17 -I./include            # Pass Clang flags
+
+# Multi-file support
+clangsql file1.cpp:schema1 file2.cpp:schema2 -i        # Schema prefixes
+clangsql "src/**/*.cpp" -- -std=c++17                  # Glob patterns
+clangsql --compile-commands build/compile_commands.json -i  # CMake project
+clangsql --build-dir build -i                          # Auto-find compile_commands.json
 ```
 
 ## Tables (11 total)
@@ -369,25 +376,61 @@ WHERE e.is_system = 0
 GROUP BY e.id ORDER BY value_count DESC;
 ```
 
-### Cross-File Analysis
+### Cross-File Analysis (Multi-TU)
 
-When multiple files are attached with schema prefixes:
+When parsing multiple files, each gets a schema prefix. Tables become:
+`schema_functions`, `schema_classes`, `schema_calls`, etc.
 
+**USR is the key to cross-file analysis** - it's consistent across translation units.
+
+**Loading Multiple Files:**
+```bash
+# Method 1: Explicit schema prefixes
+clangsql lib/utils.cpp:utils src/main.cpp:main -i -- -std=c++17 -Iinclude
+
+# Method 2: Glob patterns (auto-generates schema from filename)
+clangsql "lib/*.cpp" "src/*.cpp" -i -- -std=c++17 -Iinclude
+
+# Method 3: compile_commands.json (CMake projects)
+clangsql --compile-commands build/compile_commands.json -i
+
+# Method 4: Auto-find from build directory
+clangsql --build-dir build -i
+```
+
+**Server Mode with Multi-File:**
+```bash
+# Start server with multiple files
+clangsql lib/utils.cpp:utils lib/circle.cpp:circle --server 17200 -- -std=c++17 -Iinclude
+
+# Query remotely with cross-file joins
+clangsql --remote localhost:17200 -q "SELECT DISTINCT u.name FROM utils_functions u JOIN circle_calls c ON c.callee_usr = u.usr"
+```
+
+**Cross-File SQL Queries:**
 ```sql
--- Attach files
--- clangsql file1.cpp:f1 file2.cpp:f2 -i
+-- Find utils functions called from main
+SELECT DISTINCT u.name as called_function
+FROM utils_functions u
+JOIN main_calls c ON c.callee_usr = u.usr;
+
+-- Cross-file class hierarchy
+SELECT DISTINCT m.derived_name, u.base_name
+FROM main_inheritance m
+JOIN utils_classes u ON m.base_usr = u.usr;
+
+-- Aggregate across all schemas
+SELECT COUNT(*) as total FROM (
+    SELECT name FROM utils_functions WHERE is_system = 0
+    UNION ALL
+    SELECT name FROM main_functions WHERE is_system = 0
+);
 
 -- Find functions defined in both files (ODR candidates)
-SELECT f1.name
-FROM f1_functions f1
-JOIN f2_functions f2 ON f1.name = f2.name
-WHERE f1.is_definition = 1 AND f2.is_definition = 1;
-
--- Cross-file calls
-SELECT f1.name as caller, c.callee_name
-FROM f1_calls c
-JOIN f1_functions f1 ON c.caller_usr = f1.usr
-JOIN f2_functions f2 ON c.callee_usr = f2.usr;
+SELECT u.name
+FROM utils_functions u
+JOIN main_functions m ON u.name = m.name
+WHERE u.is_definition = 1 AND m.is_definition = 1;
 ```
 
 ## Tips

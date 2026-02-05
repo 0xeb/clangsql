@@ -1,83 +1,95 @@
 # clangsql Examples
 
-This directory contains example projects demonstrating clangsql usage.
+Example projects demonstrating clangsql usage.
+
+## demo/
+
+Multi-file demo project for quick testing.
+
+### Setup
+
+```bash
+cd clangsql/examples/demo
+
+# Generate compile_commands.json
+cmake -B build -G Ninja
+```
+
+### Query Examples
+
+```bash
+# Single file query (no prefix)
+clangsql main.cpp -e "SELECT name FROM functions WHERE is_system = 0"
+
+# Multi-file (prefixed tables: main_*, handlers_*, network_*, utils_*)
+clangsql main.cpp handlers.cpp network.cpp utils.cpp -e "SELECT name FROM main_functions WHERE is_system = 0"
+
+# With compile_commands.json (auto-loads all files, prefixed tables)
+clangsql --compile-commands build/compile_commands.json -e "SELECT * FROM main_calls WHERE is_system = 0"
+
+# AI agent mode
+clangsql main.cpp handlers.cpp network.cpp utils.cpp --agent -i
+clangsql main.cpp --prompt "Find functions that handle network connections"
+```
 
 ## sample_project/
 
-A multi-file C++ project with classes, methods, functions, enums, and structs.
-
-### Structure
-
-```
-sample_project/
-├── CMakeLists.txt           # CMake build with compile_commands.json
-├── include/
-│   └── sample/
-│       ├── math_utils.hpp   # Calculator classes, math functions
-│       └── string_utils.hpp # StringUtils class, enums, structs
-└── src/
-    ├── main.cpp             # Application entry point
-    ├── math_utils.cpp       # Math implementations
-    └── string_utils.cpp     # String implementations
-```
-
-### Build the Example
+Multi-file C++ project with classes, methods, functions, enums, and structs.
 
 ```bash
-cd sample_project
-cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build --config Release
+cd clangsql/examples/sample_project
+
+# Build to generate compile_commands.json
+cmake -B build -G Ninja
+cmake --build build
 ```
 
-### Query with clangsql
+### Query Examples
 
 ```bash
-# Single file queries
+# Basic queries
 clangsql src/math_utils.cpp -I./include -e "SELECT name FROM functions WHERE is_system = 0"
-clangsql src/math_utils.cpp -I./include -e "SELECT name FROM classes WHERE is_system = 0"
-clangsql src/math_utils.cpp -I./include -e "SELECT c.name, m.name FROM classes c JOIN methods m ON m.class_id = c.id WHERE c.is_system = 0"
 
-# Multi-file queries (schema-prefixed tables)
-clangsql src/math_utils.cpp src/string_utils.cpp -I./include \
-    -e "SELECT name FROM math_utils_classes WHERE is_system = 0"
+# With compile_commands.json
+clangsql --compile-commands build/compile_commands.json -e "SELECT name FROM functions"
 
-# Cross-schema queries
-clangsql src/math_utils.cpp src/string_utils.cpp -I./include \
-    -e "SELECT m.name as math_class, s.name as string_class FROM math_utils_classes m, string_utils_classes s WHERE m.is_system = 0 AND s.is_system = 0"
-
-# Custom schema names
-clangsql src/math_utils.cpp:math src/string_utils.cpp:str -I./include \
-    -e "SELECT name FROM math_functions WHERE is_system = 0"
+# Interactive mode
+clangsql src/main.cpp -I./include -i
 ```
 
-### What's in This Example
-
-| Entity | Count | Description |
-|--------|-------|-------------|
-| Classes | 4 | Calculator, ScientificCalculator, StringUtils, StringConfig |
-| Methods | ~15 | add, subtract, multiply, divide, power, factorial, is_prime, to_upper, to_lower, trim, split, join, contains |
-| Free Functions | 5 | gcd, lcm, reverse, starts_with, ends_with |
-| Enums | 1 | ResultCode |
-| Structs | 1 | StringConfig |
-
-### Sample Queries
+### Call Graph
 
 ```sql
--- List all user-defined classes
-SELECT name, kind, is_abstract FROM classes WHERE is_system = 0;
+SELECT caller_usr, callee_name, line FROM calls WHERE is_system = 0;
+SELECT caller_usr FROM calls WHERE callee_name = 'add';
+SELECT callee_name FROM calls WHERE is_virtual = 1;
+```
 
--- Find virtual methods
-SELECT c.name as class, m.name as method
-FROM classes c
-JOIN methods m ON m.class_id = c.id
-WHERE m.is_virtual = 1 AND c.is_system = 0;
+### Inheritance
 
--- Function extent (line numbers)
-SELECT name, line, end_line FROM functions WHERE is_system = 0 AND is_definition = 1;
+```sql
+SELECT derived_name, base_name, access FROM inheritance WHERE is_system = 0;
+SELECT derived_name FROM inheritance WHERE base_name LIKE '%Calculator%';
+```
 
--- Count entities per file
-SELECT
-    (SELECT COUNT(*) FROM classes WHERE is_system = 0) as classes,
-    (SELECT COUNT(*) FROM methods WHERE is_system = 0) as methods,
-    (SELECT COUNT(*) FROM functions WHERE is_system = 0) as functions;
+### AST Caching
+
+```bash
+clangsql src/main.cpp -I./include --cache -e "SELECT COUNT(*) FROM functions"
+clangsql --clear-cache
+```
+
+### Multi-file with Schema Prefixes
+
+```bash
+clangsql src/math_utils.cpp:math src/string_utils.cpp:str -I./include \
+    -e "SELECT name FROM math_functions"
+```
+
+### Common Queries
+
+```sql
+SELECT name, kind FROM classes WHERE is_system = 0;
+SELECT c.name, m.name FROM classes c JOIN methods m ON m.class_id = c.id WHERE m.is_virtual = 1;
+SELECT name, line, end_line FROM functions WHERE is_definition = 1;
 ```

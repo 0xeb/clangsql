@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Converts idasql-agent.md to a C++ header with embedded raw string literal.
+Converts a markdown prompt file to a C++ header with embedded raw string literal.
 Only regenerates if the hpp is older than the md or doesn't exist.
 
-Run: python scripts/embed_prompt.py prompts/idasql_agent.md src/common/idasql_agent_prompt.hpp
+Run: python scripts/embed_prompt.py prompts/clangsql_agent.md src/common/clangsql_agent_prompt.hpp
 """
 
 import sys

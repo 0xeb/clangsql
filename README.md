@@ -2,15 +2,18 @@
 
 SQL interface for Clang AST databases. Query C/C++ source code using SQL.
 
-Part of the [xsql](https://github.com/allthingsida/xsql) family (idasql, pdbsql, clangsql).
+Part of the [xsql](https://github.com/0xeb/xsql) project family.
 
 ## Features
 
 - Parse C/C++ source files with libclang
 - Query AST entities via SQL: functions, classes, methods, variables, enums
-- Multi-translation-unit support with ATTACH syntax
+- Multi-translation-unit support with schema prefixes
+- AI agent mode for natural language queries (Claude, Copilot)
+- AST caching for fast repeated queries
+- Server mode for remote analysis
 - Cross-platform: Windows, macOS, Linux
-- Same API patterns as idasql/pdbsql
+- Consistent xsql API patterns
 
 ## Quick Start
 
@@ -23,6 +26,16 @@ clangsql main.cpp -- -std=c++17 -I./include
 
 # Interactive mode
 clangsql main.cpp -i
+
+# Multi-file with schema prefixes (each file gets prefixed tables)
+clangsql lib/utils.cpp:utils src/main.cpp:main -i
+
+# Glob patterns for multiple files
+clangsql "src/**/*.cpp" -- -std=c++17 -I./include
+
+# CMake project (uses compile_commands.json)
+clangsql --compile-commands build/compile_commands.json -i
+clangsql --build-dir build -i  # Auto-find compile_commands.json
 ```
 
 ## Building
@@ -55,6 +68,77 @@ cmake --build build
 git submodule update --init external/libxsql
 cmake -B build
 cmake --build build
+```
+
+## AST Caching
+
+Enable caching to avoid re-parsing unchanged files. **Recommended for project mode** where you'll run multiple queries against the same codebase.
+
+```bash
+# Enable caching for single file
+clangsql main.cpp --cache -e "SELECT name FROM functions"
+
+# Enable caching for project mode (big speedup on re-runs!)
+clangsql --project ./src --cache -i
+
+# Show cache hit/miss messages
+clangsql --project ./src --cache --cache-verbose -i
+
+# Custom cache directory
+clangsql --project ./src --cache-dir /path/to/cache -i
+
+# Clear all cached files
+clangsql --clear-cache
+```
+
+**Cache location:** `%LOCALAPPDATA%\clangsql\cache` (Windows) or `~/.cache/clangsql` (Linux/macOS)
+
+**What's validated:** Cache is invalidated when source files, any included headers, compiler args, or Clang version change. Each file's mtime is checked, so only modified files are re-parsed.
+
+## AI Agent Mode
+
+Query your codebase using natural language.
+
+### Prerequisites for AI Features
+
+The AI agent requires one of these CLI tools installed and authenticated:
+
+| Provider | CLI Tool | Install | Login |
+|----------|----------|---------|-------|
+| Claude (default) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | Run `claude`, then `/login` |
+| GitHub Copilot | [Copilot CLI](https://github.com/features/copilot/cli/) | `npm install -g @github/copilot` | Run `copilot`, then `/login` |
+
+**Important:** You must be logged in before using AI features.
+
+### Usage
+
+```bash
+# Interactive AI session
+clangsql main.cpp --agent -i
+
+# Single-shot prompt
+clangsql main.cpp --prompt "Find all virtual methods"
+
+# Verbose mode shows generated SQL
+clangsql main.cpp --agent -v -i
+
+# Choose provider (claude or copilot)
+clangsql main.cpp --agent --provider claude -i
+```
+
+The agent generates SQL queries based on your natural language questions and executes them against the parsed AST.
+
+## Server Mode
+
+Host a parsed AST over TCP for remote querying:
+
+```bash
+# Start server (default port 17198)
+clangsql main.cpp --server
+
+# Remote client (no libclang required)
+clangsql --remote localhost:17198 -q "SELECT name FROM functions"
+clangsql --remote localhost:17198 -i
 ```
 
 ## Example Queries
@@ -138,23 +222,50 @@ add          | 3
 
 ### Multi-File Analysis
 
+clangsql supports parsing entire projects with multiple translation units. Each file gets a schema prefix, making tables like `utils_functions`, `main_classes`, etc.
+
+**Cross-file queries work via USR (Unified Symbol Resolution)** - a unique identifier consistent across translation units.
+
 ```bash
-# Attach multiple translation units with prefixes
-clangsql "file1.cpp:a" "file2.cpp:b" -i
+# Schema prefix syntax: file.cpp:schema_name
+clangsql lib/utils.cpp:utils src/main.cpp:main -i
+
+# Glob patterns (recursive)
+clangsql "src/**/*.cpp" -- -std=c++17
+
+# CMake projects with compile_commands.json
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+clangsql --compile-commands build/compile_commands.json -i
 ```
+
 ```sql
--- Compare functions across files
-SELECT 'a' as tu, name FROM a_functions WHERE is_system = 0
-UNION ALL
-SELECT 'b', name FROM b_functions WHERE is_system = 0;
+-- Find utils functions that are called from main
+SELECT DISTINCT u.name as function_called
+FROM utils_functions u
+JOIN main_calls c ON c.callee_usr = u.usr
+WHERE u.is_system = 0;
 ```
 ```
-tu | name
----+-------------
-a  | main
-a  | process_data
-b  | multiply
-b  | get_version
+function_called
+---------------
+log_info
+compute_area
+```
+
+```sql
+-- Aggregate function counts across all schemas
+SELECT COUNT(*) as total_functions FROM (
+    SELECT name FROM utils_functions WHERE is_system = 0
+    UNION ALL
+    SELECT name FROM main_functions WHERE is_system = 0
+);
+```
+
+```sql
+-- Cross-file inheritance (class in main inherits from utils)
+SELECT m.derived_name, u.name as base_class
+FROM main_inheritance m
+JOIN utils_classes u ON m.base_usr = u.usr;
 ```
 
 ### Class Layout
@@ -220,6 +331,4 @@ MIT License - see [LICENSE](LICENSE)
 
 ## Related Projects
 
-- [idasql](https://github.com/allthingsida/idasql) - SQL interface for IDA databases
-- [pdbsql](https://github.com/0xeb/pdbsql) - SQL interface for PDB files
 - [libxsql](https://github.com/0xeb/libxsql) - Shared virtual table framework

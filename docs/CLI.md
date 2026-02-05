@@ -11,6 +11,10 @@ clangsql main.cpp -e "SELECT name FROM functions WHERE is_system = 0"
 # Interactive REPL
 clangsql main.cpp -i
 
+# AI agent mode
+clangsql main.cpp --agent -i
+clangsql main.cpp --prompt "Find all virtual methods"
+
 # With compiler flags
 clangsql main.cpp -std=c++17 -I./include -e "SELECT * FROM classes"
 ```
@@ -18,7 +22,7 @@ clangsql main.cpp -std=c++17 -I./include -e "SELECT * FROM classes"
 ## Usage
 
 ```
-clangsql <files...> [options] [-- clang-args...]
+clangsql <files...> [options] [clang-args...]
 clangsql --remote host:port [options]
 ```
 
@@ -28,6 +32,8 @@ clangsql --remote host:port [options]
 |------|---------|-------------|
 | Query | `clangsql file.cpp -e "SQL"` | Execute query, exit |
 | REPL | `clangsql file.cpp -i` | Interactive mode |
+| Agent | `clangsql file.cpp --agent -i` | AI-assisted analysis |
+| Prompt | `clangsql file.cpp --prompt "..."` | Single-shot AI query |
 | Server | `clangsql file.cpp --server [port]` | Host SQL over TCP |
 
 ### Remote Mode (thin client, NO libclang required)
@@ -43,10 +49,26 @@ clangsql --remote host:port [options]
 Local Options:
   -e <sql>           Execute SQL query and exit
   -i                 Interactive mode (REPL)
-  --server [port]    Start server (default: 13337)
+  --agent            Enable AI agent mode
+  --prompt <text>    Single-shot agent prompt
+  --provider <name>  AI provider (claude, copilot)
+  -v                 Verbose agent output (shows SQL queries)
+  --server [port]    Start server (default: 17198)
   --token <token>    Auth token for server mode
   -h, --help         Show help
   --version          Show version
+
+Project Options:
+  --compile-commands <path>  Load compile_commands.json
+  --build-dir <path>         Load from build directory
+  'src/**/*.cpp'             Glob pattern for source files
+
+Cache Options:
+  --cache            Enable AST caching (faster re-parses)
+  --no-cache         Disable AST caching (default)
+  --cache-dir <path> Set cache directory
+  --clear-cache      Clear all cached AST files
+  --cache-verbose    Show cache hit/miss messages
 
 Remote Options:
   --remote host:port Connect to remote server
@@ -62,12 +84,41 @@ Clang args (auto-detected or after --):
   -W*, -f*, etc.     Other clang flags
 ```
 
+## AI Agent Mode
+
+The AI agent uses natural language to generate and execute SQL queries:
+
+```bash
+# Interactive agent session
+clangsql main.cpp --agent -i
+
+# Single prompt
+clangsql main.cpp --prompt "Find functions with more than 5 parameters"
+
+# Verbose mode (shows generated SQL)
+clangsql main.cpp --agent -v -i
+
+# Choose provider
+clangsql main.cpp --agent --provider claude -i
+clangsql main.cpp --agent --provider copilot -i
+```
+
+### Agent REPL Commands
+
+```
+clangsql> .agent help       Show agent commands
+clangsql> .agent provider   Show/set AI provider
+clangsql> .agent clear      Clear conversation history
+clangsql> .agent timeout    Show/set query timeout
+clangsql> .agent byok       Manage bring-your-own-key settings
+```
+
 ## Multi-File Support
 
 Multiple source files create schema-prefixed tables:
 
 ```bash
-# Two files → schema prefixes
+# Two files -> schema prefixes
 clangsql main.cpp utils.cpp -e "SELECT * FROM main_functions"
 clangsql main.cpp utils.cpp -e "SELECT * FROM utils_functions"
 
@@ -80,11 +131,32 @@ clangsql main.cpp utils.cpp -e "
   FROM main_calls mc
   JOIN utils_functions u ON mc.callee_name = u.name
 "
+
+# Glob patterns
+clangsql 'src/**/*.cpp' -e "SELECT COUNT(*) FROM functions"
 ```
 
 Single file mode has no prefix:
 ```bash
 clangsql main.cpp -e "SELECT * FROM functions"  # No prefix
+```
+
+## AST Caching
+
+Cache parsed ASTs for faster re-analysis:
+
+```bash
+# Enable caching (persists between runs)
+clangsql main.cpp --cache -e "SELECT * FROM functions"
+
+# Verbose shows cache hits/misses
+clangsql main.cpp --cache --cache-verbose -i
+
+# Custom cache directory
+clangsql main.cpp --cache --cache-dir ./my_cache -i
+
+# Clear cache
+clangsql --clear-cache
 ```
 
 ## Tables
@@ -133,6 +205,9 @@ FROM functions;
 clangsql> .tables          List all tables
 clangsql> .schema <table>  Show table schema
 clangsql> .attached        List attached TUs
+clangsql> .info            Show session info
+clangsql> .clear           Clear screen
+clangsql> .help            Show help
 clangsql> .quit            Exit
 ```
 
@@ -197,7 +272,7 @@ WHERE c.is_virtual = 1;
 ### Starting a Server
 
 ```bash
-# Start server on default port (13337)
+# Start server on default port (17198)
 clangsql main.cpp utils.cpp --server
 
 # Custom port
@@ -211,13 +286,13 @@ clangsql main.cpp --server 8080 --token mysecret
 
 ```bash
 # Single query
-clangsql --remote localhost:13337 -q "SELECT name FROM functions"
+clangsql --remote localhost:17198 -q "SELECT name FROM functions"
 
 # Interactive
-clangsql --remote localhost:13337 -i
+clangsql --remote localhost:17198 -i
 
 # With auth token
-clangsql --remote localhost:13337 --token mysecret -q "SELECT * FROM classes"
+clangsql --remote localhost:17198 --token mysecret -q "SELECT * FROM classes"
 ```
 
 ### Benefits of Server Mode
@@ -232,6 +307,9 @@ clangsql --remote localhost:13337 --token mysecret -q "SELECT * FROM classes"
 ```bash
 # Load flags from compile_commands.json
 clangsql --compile-commands build/compile_commands.json main.cpp -e "..."
+
+# Load from build directory
+clangsql --build-dir build main.cpp -e "..."
 
 # Auto-detect (looks in current dir and build/)
 clangsql main.cpp -e "..."  # Uses compile_commands.json if found

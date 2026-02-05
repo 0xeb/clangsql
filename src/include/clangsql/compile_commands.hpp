@@ -169,8 +169,13 @@ public:
     std::optional<CompileCommand> find(const std::filesystem::path& file) const {
         auto canonical = std::filesystem::weakly_canonical(file);
         for (const auto& cmd : commands_) {
-            auto cmd_file = std::filesystem::weakly_canonical(cmd.file);
-            if (cmd_file == canonical) {
+            // Resolve cmd.file relative to cmd.directory for proper matching
+            std::filesystem::path cmd_file = cmd.file;
+            if (cmd_file.is_relative() && !cmd.directory.empty()) {
+                cmd_file = std::filesystem::path(cmd.directory) / cmd_file;
+            }
+            auto cmd_canonical = std::filesystem::weakly_canonical(cmd_file);
+            if (cmd_canonical == canonical) {
                 return cmd;
             }
         }

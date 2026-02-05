@@ -13,7 +13,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # ============================================================================
-# libxsql dependency (same pattern as idasql/pdbsql)
+# HTTP Server Support (optional, uses cpp-httplib via libxsql thinclient)
+# ============================================================================
+
+option(CLANGSQL_WITH_HTTP "Build with HTTP REST server support" OFF)
+
+if(CLANGSQL_WITH_HTTP)
+    message(STATUS "clangsql: Building with HTTP server support")
+    set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
+endif()
+
+# ============================================================================
+# libxsql dependency
 # ============================================================================
 
 if(TARGET xsql::xsql)
@@ -105,14 +116,10 @@ if(CLANGSQL_WITH_AI_AGENT)
         set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/libagents ${CMAKE_CURRENT_BINARY_DIR}/libagents)
         message(STATUS "clangsql: Added libagents from external/libagents submodule")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../idasql/external/libagents/CMakeLists.txt")
-        # Monorepo fallback: idasql sibling
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../idasql/external/libagents ${CMAKE_CURRENT_BINARY_DIR}/libagents EXCLUDE_FROM_ALL)
-        message(STATUS "clangsql: Found libagents from idasql/external/libagents")
     else()
         message(FATAL_ERROR "libagents not found. Either:\n"
             "  1. Initialize submodule: git submodule update --init external/libagents\n"
-            "  2. Build as part of xsql monorepo with idasql")
+            "  2. Build as part of xsql monorepo")
     endif()
 endif()
 
@@ -131,7 +138,12 @@ endif()
 
 add_subdirectory(src)
 
-# Tests are in the private xsql monorepo (tests/clangsql/)
+# Examples (off by default, enable with -DCLANGSQL_BUILD_EXAMPLES=ON)
+option(CLANGSQL_BUILD_EXAMPLES "Build example projects" OFF)
+if(CLANGSQL_BUILD_EXAMPLES)
+    add_subdirectory(examples/sample_project)
+endif()
+
 
 # ============================================================================
 # Install & Export (for find_package support)
