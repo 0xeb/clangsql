@@ -60,8 +60,13 @@ endif()
 find_package(Clang CONFIG QUIET)
 
 if(Clang_FOUND)
-    message(STATUS "clangsql: Found Clang via find_package (vcpkg)")
+    message(STATUS "clangsql: Found Clang via find_package")
     set(LIBCLANG_LIBRARY libclang)
+    # Extract include directory from the imported target
+    get_target_property(_clang_inc libclang INTERFACE_INCLUDE_DIRECTORIES)
+    if(_clang_inc)
+        set(LIBCLANG_INCLUDE_DIR "${_clang_inc}")
+    endif()
 else()
     # Fallback: find libclang manually
     find_library(LIBCLANG_LIBRARY NAMES clang libclang
@@ -94,6 +99,23 @@ else()
             "  1. Install via vcpkg: vcpkg install llvm[clang]\n"
             "  2. Install system LLVM (apt install libclang-dev / brew install llvm)\n"
             "  3. Set LLVM_DIR or LLVM_ROOT environment variable")
+    endif()
+endif()
+
+# Fallback: find clang-c/Index.h if not yet located (e.g. find_package succeeded
+# but the imported target didn't carry INTERFACE_INCLUDE_DIRECTORIES)
+if(NOT LIBCLANG_INCLUDE_DIR)
+    find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
+        HINTS
+            "$ENV{LLVM_DIR}/include"
+            "$ENV{LLVM_ROOT}/include"
+            "/usr/lib/llvm-18/include"
+            "/usr/lib/llvm-17/include"
+            "/opt/homebrew/opt/llvm/include"
+            "C:/Program Files/LLVM/include"
+    )
+    if(LIBCLANG_INCLUDE_DIR)
+        message(STATUS "clangsql: Found libclang headers (fallback): ${LIBCLANG_INCLUDE_DIR}")
     endif()
 endif()
 

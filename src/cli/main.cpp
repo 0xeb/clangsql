@@ -190,7 +190,7 @@ std::vector<std::string> expand_glob(const std::string& pattern) {
     size_t last_sep = pattern.find_last_of("/\\", first_wild);
     std::filesystem::path base_dir = (last_sep == std::string::npos)
         ? std::filesystem::current_path()
-        : pattern.substr(0, last_sep);
+        : std::filesystem::path(pattern.substr(0, last_sep));
 
     // Get the pattern part
     std::string pattern_part = (last_sep == std::string::npos)
