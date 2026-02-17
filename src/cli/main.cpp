@@ -1016,7 +1016,6 @@ Endpoints:
   GET  /help     - This documentation (for LLM discovery)
   POST /query    - Execute SQL (body = raw SQL, response = JSON)
   GET  /status   - Server health
-  GET  /health   - Alias for /status
   POST /shutdown - Stop server
 
 Tables (per schema):
