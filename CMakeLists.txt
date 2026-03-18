@@ -28,7 +28,7 @@ endif()
 # ============================================================================
 
 if(TARGET xsql::xsql)
-    # Part of monorepo - already available via add_subdirectory
+    # Parent project: already available via add_subdirectory
     message(STATUS "clangsql: Using xsql::xsql from parent project")
 else()
     # Standalone build - try find_package first, then fallback to sibling directory
@@ -36,7 +36,7 @@ else()
     if(xsql_FOUND)
         message(STATUS "clangsql: Using xsql::xsql via find_package")
     elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
-        # Monorepo: sibling directory
+        # Parent project: sibling directory
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
         message(STATUS "clangsql: Added libxsql from sibling directory")
     elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/libxsql/CMakeLists.txt")
@@ -45,7 +45,7 @@ else()
         message(STATUS "clangsql: Added libxsql from external/libxsql submodule")
     else()
         message(FATAL_ERROR "libxsql not found. Either:\n"
-            "  1. Build as part of xsql monorepo\n"
+            "  1. Build from a parent project that already provides libxsql\n"
             "  2. Set xsql_DIR to the libxsql build directory\n"
             "  3. Install libxsql and ensure it's in CMAKE_PREFIX_PATH\n"
             "  4. Initialize submodule: git submodule update --init external/libxsql")
@@ -141,7 +141,7 @@ if(CLANGSQL_WITH_AI_AGENT)
     else()
         message(FATAL_ERROR "libagents not found. Either:\n"
             "  1. Initialize submodule: git submodule update --init external/libagents\n"
-            "  2. Build as part of xsql monorepo")
+            "  2. Build from a parent project that already provides libagents")
     endif()
 endif()
 

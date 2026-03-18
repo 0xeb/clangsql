@@ -11,7 +11,7 @@ Part of the [xsql](https://github.com/0xeb/xsql) project family.
 - Multi-translation-unit support with schema prefixes
 - AI agent mode for natural language queries (Claude, Copilot)
 - AST caching for fast repeated queries
-- Server mode for remote analysis
+- HTTP and MCP server modes for remote analysis
 - Cross-platform: Windows, macOS, Linux
 - Consistent xsql API patterns
 
@@ -38,6 +38,54 @@ clangsql --compile-commands build/compile_commands.json -i
 clangsql --build-dir build -i  # Auto-find compile_commands.json
 ```
 
+## CLI Reference
+
+```
+clangsql <files...> [options] [clang-args...]
+```
+
+### Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| Query | `clangsql file.cpp -e "SQL"` | Execute query, exit |
+| REPL | `clangsql file.cpp -i` | Interactive mode |
+| Agent | `clangsql file.cpp --agent -i` | AI-assisted analysis |
+| Prompt | `clangsql file.cpp --prompt "..."` | Single-shot AI query |
+| HTTP | `clangsql file.cpp --http [port]` | Host SQL over HTTP |
+
+### Options
+
+```
+Local Options:
+  -e <sql>           Execute SQL query and exit
+  -i                 Interactive mode (REPL)
+  --agent            Enable AI agent mode
+  --prompt <text>    Single-shot agent prompt
+  --provider <name>  AI provider (claude, copilot)
+  -v                 Verbose agent output (shows SQL queries)
+  --http [port]      Start HTTP REST server (default: 8080)
+  --bind <addr>      Bind address for server (default: 127.0.0.1)
+  --token <token>    Auth token for HTTP/MCP mode
+  -h, --help         Show help
+  --version          Show version
+
+Project Options:
+  --compile-commands <path>  Load compile_commands.json
+  --build-dir <path>         Load from build directory
+  --project <dir>            Parse entire directory (unified schema)
+  --pattern <glob>           File patterns for --project
+  --exclude <dir>            Directories to exclude
+  'src/**/*.cpp'             Glob pattern for source files
+
+Cache Options:
+  --cache            Enable AST caching (faster re-parses)
+  --no-cache         Disable AST caching (default)
+  --cache-dir <path> Set cache directory
+  --clear-cache      Clear all cached AST files
+  --cache-verbose    Show cache hit/miss messages
+```
+
 ## Building
 
 ### Prerequisites
@@ -54,12 +102,11 @@ cmake -B build -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cma
 cmake --build build
 ```
 
-### Build as part of xsql monorepo
+### Build from a parent project
 
 ```bash
-cd xsql
-cmake -B build
-cmake --build build
+cmake -S <parent-project-root> -B build
+cmake --build build --target clangsql
 ```
 
 ### Standalone build
@@ -128,17 +175,16 @@ clangsql main.cpp --agent --provider claude -i
 
 The agent generates SQL queries based on your natural language questions and executes them against the parsed AST.
 
-## Server Mode
+## HTTP Server Mode
 
-Host a parsed AST over TCP for remote querying:
+Host a parsed AST over HTTP for remote querying:
 
 ```bash
-# Start server (default port 17198)
-clangsql main.cpp --server
+# Start server (default port 8080)
+clangsql main.cpp --http
 
-# Remote client (no libclang required)
-clangsql --remote localhost:17198 -q "SELECT name FROM functions"
-clangsql --remote localhost:17198 -i
+# Query from another terminal
+curl -X POST http://localhost:8080/query -d "SELECT name FROM functions"
 ```
 
 ## HTTP REST API

@@ -14,7 +14,4 @@ namespace clangsql {
 /// Library version
 constexpr const char* VERSION = "0.1.0";
 
-/// Default server port for clangsql server mode
-constexpr int DEFAULT_PORT = 17198;
-
 } // namespace clangsql

@@ -277,7 +277,7 @@ public:
     }
 
     /// Execute SQL (no results)
-    int exec(const std::string& sql) {
+    xsql::Status exec(const std::string& sql) {
         return db_.exec(sql);
     }
 

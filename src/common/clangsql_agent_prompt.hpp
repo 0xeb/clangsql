@@ -1,5 +1,5 @@
 // Auto-generated from clangsql_agent.md
-// Generated: 2026-01-24T23:46:15.050462
+// Generated: 2026-02-19T06:06:14.431049
 // DO NOT EDIT - regenerate with: python scripts/embed_prompt.py
 
 #pragma once
@@ -47,21 +47,94 @@ Tables become prefixed: `a_functions`, `b_functions`. Use USR to correlate symbo
 ## CLI Usage
 
 ```bash
-# Basic usage
 clangsql main.cpp -e "SELECT name FROM functions"      # Single query
 clangsql main.cpp -i                                    # Interactive REPL
-clangsql main.cpp --server                              # Server mode
-clangsql --remote localhost:17198 -q "SELECT ..."      # Remote client
+clangsql main.cpp --http 8080                           # HTTP server mode
 clangsql main.cpp -- -std=c++17 -I./include            # Pass Clang flags
-
-# Multi-file support
-clangsql file1.cpp:schema1 file2.cpp:schema2 -i        # Schema prefixes
-clangsql "src/**/*.cpp" -- -std=c++17                  # Glob patterns
-clangsql --compile-commands build/compile_commands.json -i  # CMake project
-clangsql --build-dir build -i                          # Auto-find compile_commands.json
 ```
 
-## Tables (11 total)
+## Project Mode
+
+Analyze entire codebases with a unified schema. Files are deduplicated by USR, giving you a single view across all translation units.
+
+```bash
+# Analyze all .cpp files in a directory
+clangsql --project ./src -i
+
+# Custom file patterns
+clangsql --project ./src --pattern "*.cpp" --pattern "*.cxx" -i
+
+# Exclude directories
+clangsql --project ./src --exclude build --exclude third_party -i
+
+# With Clang flags
+clangsql --project ./src -- -std=c++17 -I./include -DDEBUG
+```
+
+### AST Caching (Speed Up Re-parses)
+
+Enable caching to avoid re-parsing unchanged files. Cache validates source AND all include file mtimes.
+
+```bash
+# Enable caching (disabled by default)
+clangsql --project ./src --cache -i
+
+# With verbose output (shows cache hits/misses)
+clangsql --project ./src --cache --cache-verbose -i
+
+# Custom cache directory
+clangsql --project ./src --cache-dir C:/my/cache -i
+
+# Clear all cached files
+clangsql --clear-cache
+```
+
+**Cache location:** `%LOCALAPPDATA%\clangsql\cache` (Windows) or `~/.cache/clangsql` (Linux/macOS)
+
+**When to use:** Enable `--cache` for repeated analysis of the same project. First parse is slightly slower (writes cache), but subsequent runs are much faster for unchanged files.
+
+### How Deduplication Works
+- **Functions, classes, methods, variables, enums**: Deduplicated by USR (same symbol = one row)
+- **Files**: Deduplicated by normalized path
+- **Calls, inheritance, string_literals**: NOT deduplicated (each occurrence preserved with `file_id`)
+
+### Project Mode Queries
+
+```sql
+-- Files in the project
+SELECT path FROM files WHERE is_system = 0;
+
+-- Functions with their source files
+SELECT f.name, fi.path
+FROM functions f
+JOIN files fi ON f.file_id = fi.id
+WHERE f.is_system = 0;
+
+-- Calls by source file
+SELECT fi.path, c.callee_name, COUNT(*) as call_count
+FROM calls c
+JOIN files fi ON c.file_id = fi.id
+WHERE c.is_system = 0
+GROUP BY fi.path, c.callee_name
+ORDER BY call_count DESC;
+
+-- String literals across the project
+SELECT value, COUNT(*) as occurrences
+FROM string_literals
+WHERE is_system = 0
+GROUP BY value
+ORDER BY occurrences DESC LIMIT 20;
+
+-- Functions per file
+SELECT fi.path, COUNT(f.id) as func_count
+FROM files fi
+LEFT JOIN functions f ON f.file_id = fi.id
+WHERE fi.is_system = 0
+GROUP BY fi.id
+ORDER BY func_count DESC;
+```
+
+## Tables (12 total)
 
 All tables have `is_system` column (1=system header, 0=user code).
 
@@ -186,6 +259,7 @@ Function call graph.
 | callee_name | TEXT | Called function name |
 | line, column | INT | Call site position |
 | is_virtual | INT | 1=virtual method call |
+| file_id | INT | FK to files (project mode) |
 
 ### inheritance
 Class hierarchy.
@@ -199,6 +273,45 @@ Class hierarchy.
 | base_name | TEXT | Base class name |
 | access | TEXT | "public", "protected", "private" |
 | is_virtual | INT | 1=virtual inheritance |
+| file_id | INT | FK to files (project mode) |
+
+### string_literals
+String constants found in code, with direct FK to enclosing function for fast queries.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INT | Primary key |
+| content | TEXT | String content (unescaped) |
+| file_id | INT | FK to files |
+| line | INT | Line number |
+| column | INT | Column number |
+| function_usr | TEXT | Enclosing function USR (empty if global) |
+| func_id | INT | **FK to functions** (0 if global) - fast queries! |
+| is_wide | INT | 1=wide string (L"...") |
+| is_system | INT | 1=system header |
+
+**Fast String Queries (use func_id, not line ranges!):**
+```sql
+-- All strings in a specific function (O(1) lookup)
+SELECT content FROM string_literals WHERE func_id = 42;
+
+-- Which function has the most string literals? (fast GROUP BY)
+SELECT f.name, COUNT(*) as count
+FROM string_literals s
+JOIN functions f ON s.func_id = f.id
+WHERE s.is_system = 0 AND f.is_system = 0
+GROUP BY s.func_id
+ORDER BY count DESC LIMIT 10;
+
+-- Functions with hardcoded "password" strings
+SELECT DISTINCT f.name
+FROM string_literals s
+JOIN functions f ON s.func_id = f.id
+WHERE s.content LIKE '%password%' AND s.is_system = 0;
+
+-- Global strings (not inside any function)
+SELECT content FROM string_literals WHERE func_id = 0 AND is_system = 0;
+```
 
 ## Common Queries
 
@@ -376,66 +489,30 @@ WHERE e.is_system = 0
 GROUP BY e.id ORDER BY value_count DESC;
 ```
 
-### Cross-File Analysis (Multi-TU)
+### Cross-File Analysis
 
-When parsing multiple files, each gets a schema prefix. Tables become:
-`schema_functions`, `schema_classes`, `schema_calls`, etc.
+When multiple files are attached with schema prefixes:
 
-**USR is the key to cross-file analysis** - it's consistent across translation units.
-
-**Loading Multiple Files:**
-```bash
-# Method 1: Explicit schema prefixes
-clangsql lib/utils.cpp:utils src/main.cpp:main -i -- -std=c++17 -Iinclude
-
-# Method 2: Glob patterns (auto-generates schema from filename)
-clangsql "lib/*.cpp" "src/*.cpp" -i -- -std=c++17 -Iinclude
-
-# Method 3: compile_commands.json (CMake projects)
-clangsql --compile-commands build/compile_commands.json -i
-
-# Method 4: Auto-find from build directory
-clangsql --build-dir build -i
-```
-
-**Server Mode with Multi-File:**
-```bash
-# Start server with multiple files
-clangsql lib/utils.cpp:utils lib/circle.cpp:circle --server 17200 -- -std=c++17 -Iinclude
-
-# Query remotely with cross-file joins
-clangsql --remote localhost:17200 -q "SELECT DISTINCT u.name FROM utils_functions u JOIN circle_calls c ON c.callee_usr = u.usr"
-```
-
-**Cross-File SQL Queries:**
 ```sql
--- Find utils functions called from main
-SELECT DISTINCT u.name as called_function
-FROM utils_functions u
-JOIN main_calls c ON c.callee_usr = u.usr;
-
--- Cross-file class hierarchy
-SELECT DISTINCT m.derived_name, u.base_name
-FROM main_inheritance m
-JOIN utils_classes u ON m.base_usr = u.usr;
-
--- Aggregate across all schemas
-SELECT COUNT(*) as total FROM (
-    SELECT name FROM utils_functions WHERE is_system = 0
-    UNION ALL
-    SELECT name FROM main_functions WHERE is_system = 0
-);
+-- Attach files
+-- clangsql file1.cpp:f1 file2.cpp:f2 -i
 
 -- Find functions defined in both files (ODR candidates)
-SELECT u.name
-FROM utils_functions u
-JOIN main_functions m ON u.name = m.name
-WHERE u.is_definition = 1 AND m.is_definition = 1;
+SELECT f1.name
+FROM f1_functions f1
+JOIN f2_functions f2 ON f1.name = f2.name
+WHERE f1.is_definition = 1 AND f2.is_definition = 1;
+
+-- Cross-file calls
+SELECT f1.name as caller, c.callee_name
+FROM f1_calls c
+JOIN f1_functions f1 ON c.caller_usr = f1.usr
+JOIN f2_functions f2 ON c.callee_usr = f2.usr;
 ```
 
 ## Tips
-
-- **Always filter system headers**: `WHERE is_system = 0` unless you specifically want STL/OS symbols
+)PROMPT"
+    R"PROMPT(- **Always filter system headers**: `WHERE is_system = 0` unless you specifically want STL/OS symbols
 - **Use USR for cross-table matching**: `calls.caller_usr = functions.usr`
 - **Use id for parent-child**: `methods.class_id = classes.id`
 - **Pattern matching**: `LIKE 'get%'`, `LIKE '%Handler%'`, `LIKE '%_t'`
@@ -481,6 +558,128 @@ If a query returns unexpected results:
 3. **Check counts**: `SELECT COUNT(*) FROM table WHERE is_system = 0`
 4. **Inspect sample**: `SELECT * FROM table WHERE is_system = 0 LIMIT 5`
 5. **Verify joins**: Print both sides before joining
+
+---
+
+## Server Modes
+
+CLANGSQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+
+---
+
+### HTTP REST Server (Recommended)
+
+Standard REST API that works with curl, any HTTP client, or LLM tools.
+
+**Starting the server:**
+```bash
+# Default port 8081
+clangsql main.cpp --http
+
+# Custom port and bind address
+clangsql main.cpp --http 9000 --bind 0.0.0.0
+
+# With authentication
+clangsql main.cpp --http 8081 --token mysecret
+```
+
+**HTTP Endpoints:**
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/` | GET | No | Welcome message |
+| `/help` | GET | No | API documentation (for LLM discovery) |
+| `/query` | POST | Yes* | Execute SQL (body = raw SQL) |
+| `/status` | GET | Yes* | Health check |
+| `/shutdown` | POST | Yes* | Stop server |
+
+*Auth required only if `--token` was specified.
+
+**Example with curl:**
+```bash
+# Get API documentation
+curl http://localhost:8081/help
+
+# Execute SQL query
+curl -X POST http://localhost:8081/query -d "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
+
+# With authentication
+curl -X POST http://localhost:8081/query \
+     -H "Authorization: Bearer mysecret" \
+     -d "SELECT * FROM classes"
+
+# Check status
+curl http://localhost:8081/status
+```
+
+**Response Format (JSON):**
+```json
+{"success": true, "columns": ["name"], "rows": [["main"]], "row_count": 1}
+```
+
+```json
+{"success": false, "error": "no such table: bad_table"}
+```
+
+---
+
+### MCP Server (Model Context Protocol)
+
+Start an MCP server for integration with Claude Desktop and other MCP clients.
+
+**Starting from the REPL:**
+```
+clangsql> .mcp start
+MCP server started on port 9042
+SSE endpoint: http://127.0.0.1:9042/sse
+
+Available tools:
+  clangsql_query  - Execute SQL query directly
+  clangsql_agent  - Ask natural language question (AI-powered)
+```
+
+**REPL Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.mcp` | Show status or start if not running |
+| `.mcp start` | Start MCP server on random port |
+| `.mcp stop` | Stop MCP server |
+| `.mcp help` | Show MCP help |
+
+**Claude Desktop Configuration:**
+```json
+{
+  "mcpServers": {
+    "clangsql": {
+      "url": "http://127.0.0.1:<port>/sse"
+    }
+  }
+}
+```
+
+---
+
+### Dynamic HTTP Server (from REPL)
+
+Start/stop the HTTP server dynamically from the agent REPL:
+
+```
+clangsql> .http start
+HTTP server started on port 8142
+URL: http://127.0.0.1:8142
+```
+
+**REPL Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.http` | Show status or start if not running |
+| `.http start` | Start HTTP server on random port |
+| `.http stop` | Stop HTTP server |
+| `.http help` | Show HTTP help |
+
+Press Ctrl+C to stop the server and return to the REPL.
 )PROMPT";
 
 } // namespace clangsql

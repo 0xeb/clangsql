@@ -40,8 +40,7 @@ Tables become prefixed: `a_functions`, `b_functions`. Use USR to correlate symbo
 ```bash
 clangsql main.cpp -e "SELECT name FROM functions"      # Single query
 clangsql main.cpp -i                                    # Interactive REPL
-clangsql main.cpp --server                              # Server mode
-clangsql --remote localhost:17198 -q "SELECT ..."      # Remote client
+clangsql main.cpp --http 8080                           # HTTP server mode
 clangsql main.cpp -- -std=c++17 -I./include            # Pass Clang flags
 ```
 
@@ -611,24 +610,6 @@ curl http://localhost:8081/status
 
 ```json
 {"success": false, "error": "no such table: bad_table"}
-```
-
----
-
-### Raw TCP Server (Legacy)
-
-Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
-
-**Starting the server:**
-```bash
-clangsql main.cpp --server 13337
-clangsql main.cpp --server 13337 --token mysecret
-```
-
-**Connecting as client:**
-```bash
-clangsql --remote localhost:13337 -q "SELECT name FROM functions LIMIT 5"
-clangsql --remote localhost:13337 -i
 ```
 
 ---
