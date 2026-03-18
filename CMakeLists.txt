@@ -120,19 +120,19 @@ option(CLANGSQL_WITH_AI_AGENT "Enable AI agent support" ON)
 
 if(CLANGSQL_WITH_AI_AGENT)
     if(TARGET libagents)
-        # Already available from parent
         message(STATUS "clangsql: Using libagents from parent project")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/libagents/CMakeLists.txt")
-        # Standalone: submodule in external/
+    else()
+        message(STATUS "clangsql: Fetching libagents from GitHub...")
         set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/libagents ${CMAKE_CURRENT_BINARY_DIR}/libagents)
-        message(STATUS "clangsql: Added libagents from external/libagents submodule")
-    else()
-        message(FATAL_ERROR "libagents not found. Either:\n"
-            "  1. Initialize submodule: git submodule update --init external/libagents\n"
-            "  2. Build from a parent project that already provides libagents")
+        include(FetchContent)
+        FetchContent_Declare(libagents
+            GIT_REPOSITORY https://github.com/0xeb/libagents.git
+            GIT_TAG        main
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(libagents)
     endif()
 endif()
 
