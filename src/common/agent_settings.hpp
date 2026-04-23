@@ -19,6 +19,14 @@
 #include <cstdlib>
 
 #ifdef _WIN32
+// Prevent <windows.h> from pulling in legacy <winsock.h>, which collides with
+// <winsock2.h> / <ws2tcpip.h> used by the HTTP and MCP transports later in
+// the compile unit (sockaddr / fd_set / IP_MSFILTER redefinitions).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <shlobj.h>
 #include <windows.h>
 #else

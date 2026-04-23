@@ -1,7 +1,7 @@
 {
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
     "name": "clangsql",
-    "version": "0.1.0",
+    "version": "0.0.2",
     "description": "SQL interface for Clang AST databases",
     "homepage": "https://github.com/0xeb/clangsql",
     "license": "MIT",

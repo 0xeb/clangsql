@@ -25,6 +25,7 @@
 #include <chrono>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 
 #ifdef CLANGSQL_HAS_AI_AGENT
 #include "ai_agent.hpp"
@@ -92,8 +93,8 @@ void print_usage(const char* argv0) {
               << "\n"
               << "Project Options:\n"
               << "  --project <dir>            Parse entire directory (unified schema)\n"
-              << "  --pattern <glob>           File patterns for --project (default: *.c *.cpp)\n"
-              << "  --exclude <dir>            Directories to exclude (default: test,build)\n"
+              << "  --pattern <glob>           File patterns (default: *.c *.cpp for --project; no filter otherwise)\n"
+              << "  --exclude <dir>            Directories to exclude (default: test,build for --project; no filter otherwise)\n"
               << "  --compile-commands <path>  Load compile_commands.json\n"
               << "  --build-dir <path>         Load from build directory\n"
               << "  'src/**/*.cpp'             Glob pattern for source files\n"
@@ -257,6 +258,51 @@ bool is_clangsql_option(const std::string& arg) {
            arg == "--provider" || arg == "-v" ||
 #endif
            false;
+}
+
+/// Check if a file path matches pattern/exclude filters.
+/// patterns: glob patterns like "*.cpp" matched against filename only
+///           (case-insensitive via clangsql::detail::matches_any_basename_glob).
+/// excludes: directory names; if any component of the path matches case-insensitively,
+///           the file is excluded. Case folding keeps behavior consistent on
+///           case-insensitive filesystems (Windows, macOS default).
+/// Returns true if the file should be included.
+bool matches_filters(const std::string& filepath,
+                     const std::vector<std::string>& patterns,
+                     const std::vector<std::string>& excludes) {
+    namespace fs = std::filesystem;
+    fs::path p(filepath);
+    std::string filename = p.filename().string();
+
+    auto to_lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+
+    // Check excludes first (match against any path component, case-insensitive)
+    if (!excludes.empty()) {
+        std::vector<std::string> excludes_lc;
+        excludes_lc.reserve(excludes.size());
+        for (const auto& exc : excludes) excludes_lc.push_back(to_lower(exc));
+
+        for (auto it = p.begin(); it != p.end(); ++it) {
+            std::string component_lc = to_lower(it->string());
+            for (const auto& exc : excludes_lc) {
+                if (component_lc == exc)
+                    return false;
+            }
+        }
+    }
+
+    // Check patterns (match filename against glob patterns)
+    if (!patterns.empty()) {
+        if (!clangsql::detail::matches_any_basename_glob(filename, patterns)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /// Parse file:schema syntax, returns {file, schema}
@@ -836,8 +882,8 @@ Authentication (if enabled):
   Or:     X-XSQL-Token: <token>
 
 Example:
-  curl http://localhost:8081/help
-  curl -X POST http://localhost:8081/query -d "SELECT name FROM functions LIMIT 5"
+  curl http://localhost:8080/help
+  curl -X POST http://localhost:8080/query -d "SELECT name FROM functions LIMIT 5"
 )";
 
 int run_http_mode(clangsql::Session& session, int port, const std::string& bind_addr, const std::string& auth_token) {
@@ -1046,7 +1092,8 @@ int main(int argc, char* argv[]) {
         }
         std::cerr << "Loaded " << compile_db.size() << " compile commands\n";
         for (const auto& cmd : compile_db.commands()) {
-            if (is_source_file(cmd.file)) {
+            if (is_source_file(cmd.file) &&
+                matches_filters(cmd.file, project_patterns, project_excludes)) {
                 source_files.push_back({cmd.file, schema_from_path(cmd.file)});
             }
         }
@@ -1057,7 +1104,8 @@ int main(int argc, char* argv[]) {
         }
         std::cerr << "Loaded " << compile_db.size() << " compile commands\n";
         for (const auto& cmd : compile_db.commands()) {
-            if (is_source_file(cmd.file)) {
+            if (is_source_file(cmd.file) &&
+                matches_filters(cmd.file, project_patterns, project_excludes)) {
                 source_files.push_back({cmd.file, schema_from_path(cmd.file)});
             }
         }

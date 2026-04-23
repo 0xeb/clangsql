@@ -56,22 +56,46 @@ public:
     }
 };
 
-/// Shared USR to ID mapping for classes, functions, enums
-/// Built once and shared across all table builders for consistent foreign keys
+/// Shared USR to ID mapping for classes, free functions, methods, enums
+/// Built once and shared across all table builders for consistent foreign keys.
+/// Free functions and methods live in disjoint id spaces so that child rows
+/// (parameters, variables, string literals) can unambiguously refer to either
+/// via `function_id` (free functions) or `method_id` (methods).
 class EntityMap {
 public:
     std::unordered_map<std::string, int64_t> class_usr_to_id;
-    std::unordered_map<std::string, int64_t> func_usr_to_id;
+    std::unordered_map<std::string, int64_t> free_func_usr_to_id;
+    std::unordered_map<std::string, int64_t> method_usr_to_id;
     std::unordered_map<std::string, int64_t> enum_usr_to_id;
+
+    struct CallableRef {
+        int64_t id = 0;
+        bool is_method = false;
+    };
 
     int64_t get_class_id(const std::string& usr) const {
         auto it = class_usr_to_id.find(usr);
         return (it != class_usr_to_id.end()) ? it->second : 0;
     }
 
-    int64_t get_func_id(const std::string& usr) const {
-        auto it = func_usr_to_id.find(usr);
-        return (it != func_usr_to_id.end()) ? it->second : 0;
+    int64_t get_free_func_id(const std::string& usr) const {
+        auto it = free_func_usr_to_id.find(usr);
+        return (it != free_func_usr_to_id.end()) ? it->second : 0;
+    }
+
+    int64_t get_method_id(const std::string& usr) const {
+        auto it = method_usr_to_id.find(usr);
+        return (it != method_usr_to_id.end()) ? it->second : 0;
+    }
+
+    /// Resolve an enclosing callable USR without caring which kind it is.
+    /// Returns {id, is_method}. {0, false} when not found.
+    CallableRef resolve_callable(const std::string& usr) const {
+        auto fit = free_func_usr_to_id.find(usr);
+        if (fit != free_func_usr_to_id.end()) return {fit->second, false};
+        auto mit = method_usr_to_id.find(usr);
+        if (mit != method_usr_to_id.end()) return {mit->second, true};
+        return {};
     }
 
     int64_t get_enum_id(const std::string& usr) const {
@@ -244,12 +268,18 @@ static FileMap build_file_map(const TranslationUnit& tu) {
 static EntityMap build_entity_map(const TranslationUnit& tu) {
     EntityMap map;
     int64_t next_class_id = 1;
-    int64_t next_func_id = 1;
+    int64_t next_free_func_id = 1;
+    int64_t next_method_id = 1;
     int64_t next_enum_id = 1;
 
     CXCursor root = tu.cursor();
 
-    // Single pass to collect all entities with consistent IDs
+    // Pass 1: collect all classes, free functions, and enums. These are the
+    // emittable parent-table entities. We do classes first so that pass 2
+    // (methods) can reliably test whether a method's parent class is in
+    // `class_usr_to_id` — AST visitation order can produce template classes
+    // interleaved with concrete classes, and we need a stable "is this class
+    // emittable?" check that doesn't depend on traversal order.
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
         std::string usr = cursor_usr(cursor);
@@ -258,7 +288,6 @@ static EntityMap build_entity_map(const TranslationUnit& tu) {
             return CXChildVisit_Recurse;
         }
 
-        // Classes, structs, unions
         if (kind == CXCursor_ClassDecl ||
             kind == CXCursor_StructDecl ||
             kind == CXCursor_UnionDecl) {
@@ -266,22 +295,50 @@ static EntityMap build_entity_map(const TranslationUnit& tu) {
                 map.class_usr_to_id[usr] = next_class_id++;
             }
         }
-        // Functions and methods
-        else if (kind == CXCursor_FunctionDecl ||
-                 kind == CXCursor_CXXMethod ||
-                 kind == CXCursor_Constructor ||
-                 kind == CXCursor_Destructor) {
-            if (map.func_usr_to_id.find(usr) == map.func_usr_to_id.end()) {
-                map.func_usr_to_id[usr] = next_func_id++;
+        else if (kind == CXCursor_FunctionDecl) {
+            if (map.free_func_usr_to_id.find(usr) == map.free_func_usr_to_id.end()) {
+                map.free_func_usr_to_id[usr] = next_free_func_id++;
             }
         }
-        // Enums
         else if (kind == CXCursor_EnumDecl) {
             if (map.enum_usr_to_id.find(usr) == map.enum_usr_to_id.end()) {
                 map.enum_usr_to_id[usr] = next_enum_id++;
             }
         }
 
+        return CXChildVisit_Recurse;
+    });
+
+    // Pass 2: collect methods whose parent class is emittable. Methods on
+    // class templates / template specializations are skipped here because
+    // `build_methods_table_with_map` wouldn't emit a row for them (it gates
+    // on `get_class_id(parent_usr) != 0`). Registering them in
+    // `method_usr_to_id` would cause child tables (parameters, variables,
+    // string_literals) to route FKs into `method_id` slots that have no
+    // matching row in `methods`, producing dangling joins.
+    visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
+        CXCursorKind kind = clang_getCursorKind(cursor);
+        if (kind != CXCursor_CXXMethod &&
+            kind != CXCursor_Constructor &&
+            kind != CXCursor_Destructor) {
+            return CXChildVisit_Recurse;
+        }
+
+        std::string usr = cursor_usr(cursor);
+        if (usr.empty()) {
+            return CXChildVisit_Recurse;
+        }
+
+        CXCursor parent = clang_getCursorSemanticParent(cursor);
+        std::string parent_usr = cursor_usr(parent);
+        if (parent_usr.empty() ||
+            map.class_usr_to_id.find(parent_usr) == map.class_usr_to_id.end()) {
+            return CXChildVisit_Recurse;
+        }
+
+        if (map.method_usr_to_id.find(usr) == map.method_usr_to_id.end()) {
+            map.method_usr_to_id[usr] = next_method_id++;
+        }
         return CXChildVisit_Recurse;
     });
 
@@ -342,7 +399,7 @@ std::vector<FunctionRow> build_functions_table_with_map(const TranslationUnit& t
         }
 
         std::string usr = cursor_usr(cursor);
-        int64_t id = entities.get_func_id(usr);
+        int64_t id = entities.get_free_func_id(usr);
         if (id == 0) {
             return CXChildVisit_Recurse;  // Not in entity map
         }
@@ -450,11 +507,11 @@ std::vector<MethodRow> build_methods_table(const TranslationUnit& tu) {
 
 std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, const FileMap& map, const EntityMap& entities) {
     std::vector<MethodRow> methods;
-    int64_t next_id = 1;
+    (void)map;  // map accepted for builder-signature uniformity; methods have no file_id column
 
     CXCursor root = tu.cursor();
 
-    // Collect methods using shared EntityMap for class_id
+    // Collect methods using shared EntityMap for class_id and method id
     visit_children(root, [&](CXCursor cursor, CXCursor) -> CXChildVisitResult {
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -462,6 +519,12 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
             kind != CXCursor_Constructor &&
             kind != CXCursor_Destructor) {
             return CXChildVisit_Recurse;
+        }
+
+        std::string usr = cursor_usr(cursor);
+        int64_t id = entities.get_method_id(usr);
+        if (id == 0) {
+            return CXChildVisit_Recurse;  // Not in entity map (empty USR, etc.)
         }
 
         // Get parent class
@@ -476,9 +539,9 @@ std::vector<MethodRow> build_methods_table_with_map(const TranslationUnit& tu, c
         auto extent = get_definition_extent(cursor);  // Includes body for definitions
 
         MethodRow row;
-        row.id = next_id++;
-        row.usr = cursor_usr(cursor);
-        row.class_id = class_id;  // Use shared ID from EntityMap
+        row.id = id;               // Stable, USR-keyed id from EntityMap
+        row.usr = usr;
+        row.class_id = class_id;   // Use shared ID from EntityMap
         row.name = cursor_spelling(cursor);
         row.qualified_name = qualified_name(cursor);
 
@@ -602,15 +665,18 @@ std::vector<VariableRow> build_variables_table_with_map(const TranslationUnit& t
             parent_kind == CXCursor_CXXMethod ||
             parent_kind == CXCursor_Constructor ||
             parent_kind == CXCursor_Destructor) {
-            // Local variable - use shared ID from EntityMap
+            // Local variable — route to function_id or method_id based on parent kind.
             std::string parent_usr = cursor_usr(parent);
-            row.function_id = entities.get_func_id(parent_usr);
+            EntityMap::CallableRef ref = entities.resolve_callable(parent_usr);
+            row.function_id = ref.is_method ? 0 : ref.id;
+            row.method_id = ref.is_method ? ref.id : 0;
 
             CX_StorageClass storage = clang_Cursor_getStorageClass(cursor);
             row.scope_kind = (storage == CX_SC_Static) ? "static_local" : "local";
         } else {
             // Global variable
             row.function_id = 0;
+            row.method_id = 0;
             row.scope_kind = "global";
         }
 
@@ -658,17 +724,18 @@ std::vector<ParameterRow> build_parameters_table_with_map(const TranslationUnit&
             return CXChildVisit_Recurse;
         }
 
-        // Get parent function
+        // Get parent function or method
         CXCursor parent = clang_getCursorSemanticParent(cursor);
         std::string parent_usr = cursor_usr(parent);
-        int64_t function_id = entities.get_func_id(parent_usr);
-        if (function_id == 0) {
-            return CXChildVisit_Recurse;  // Parent function not in entity map
+        EntityMap::CallableRef ref = entities.resolve_callable(parent_usr);
+        if (ref.id == 0) {
+            return CXChildVisit_Recurse;  // Parent callable not in entity map
         }
 
         ParameterRow row;
         row.id = next_id++;
-        row.function_id = function_id;  // Use shared ID from EntityMap
+        row.function_id = ref.is_method ? 0 : ref.id;
+        row.method_id = ref.is_method ? ref.id : 0;
         row.name = cursor_spelling(cursor);
         row.type = cursor_type_spelling(cursor);
 
@@ -1041,7 +1108,7 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
             kind == CXCursor_Destructor) {
             if (is_definition(cursor)) {
                 std::string func_usr = cursor_usr(cursor);
-                int64_t func_id = entities.get_func_id(func_usr);
+                EntityMap::CallableRef enclosing = entities.resolve_callable(func_usr);
 
                 // Visit this function's children to find string literals
                 visit_children(cursor, [&](CXCursor child, CXCursor) -> CXChildVisitResult {
@@ -1054,7 +1121,8 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
                         row.line = loc.line;
                         row.column = loc.column;
                         row.function_usr = func_usr;
-                        row.func_id = func_id;
+                        row.func_id = enclosing.is_method ? 0 : enclosing.id;
+                        row.method_id = enclosing.is_method ? enclosing.id : 0;
                         row.is_system = is_in_system_header(child);
 
                         // Get the string content
@@ -1088,7 +1156,8 @@ std::vector<StringLiteralRow> build_string_literals_table_with_map(const Transla
             row.line = loc.line;
             row.column = loc.column;
             row.function_usr = "";  // Global scope
-            row.func_id = 0;        // No enclosing function
+            row.func_id = 0;        // No enclosing free function
+            row.method_id = 0;      // No enclosing method
             row.is_system = is_in_system_header(cursor);
 
             std::string literal = cursor_spelling(cursor);
@@ -1253,6 +1322,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_int64("file_id", [](const VariableRow& r) { return r.file_id; })
         .column_int("line", [](const VariableRow& r) { return static_cast<int>(r.line); })
         .column_int64("function_id", [](const VariableRow& r) { return r.function_id; })
+        .column_int64("method_id", [](const VariableRow& r) { return r.method_id; })
         .column_int64("namespace_id", [](const VariableRow& r) { return r.namespace_id; })
         .column_text("scope_kind", [](const VariableRow& r) { return r.scope_kind; })
         .column_text("storage_class", [](const VariableRow& r) { return r.storage_class; })
@@ -1269,6 +1339,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         })
         .column_int64("id", [](const ParameterRow& r) { return r.id; })
         .column_int64("function_id", [](const ParameterRow& r) { return r.function_id; })
+        .column_int64("method_id", [](const ParameterRow& r) { return r.method_id; })
         .column_text("name", [](const ParameterRow& r) { return r.name; })
         .column_text("type", [](const ParameterRow& r) { return r.type; })
         .column_int("index_", [](const ParameterRow& r) { return r.index; })
@@ -1352,6 +1423,7 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
         .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
         .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
         .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
+        .column_int64("method_id", [](const StringLiteralRow& r) { return r.method_id; })
         .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
         .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
         .build();
@@ -1390,6 +1462,45 @@ void register_project_tables(xsql::Database& db,
     std::set<std::string> seen_enums;      // by USR
     std::set<std::string> seen_inheritance; // by derived_usr:base_usr
 
+    std::unordered_map<std::string, int64_t> global_file_ids;
+    std::unordered_map<std::string, int64_t> global_function_ids;
+    std::unordered_map<std::string, int64_t> global_method_ids;
+    std::unordered_map<std::string, int64_t> global_class_ids;
+    std::unordered_map<std::string, int64_t> global_enum_ids;
+    int64_t next_file_id = 1;
+    int64_t next_function_id = 1;
+    int64_t next_method_id = 1;
+    int64_t next_class_id = 1;
+    int64_t next_enum_id = 1;
+
+    auto assign_global_id = [](std::unordered_map<std::string, int64_t>& ids,
+                               const std::string& key,
+                               int64_t& next_id) {
+        auto [it, inserted] = ids.emplace(key, next_id);
+        if (inserted) {
+            ++next_id;
+        }
+        return it->second;
+    };
+
+    auto lookup_file_path = [](const std::unordered_map<int64_t, std::string>& paths_by_id,
+                               int64_t local_id) -> std::string {
+        if (local_id == 0) {
+            return {};
+        }
+        auto it = paths_by_id.find(local_id);
+        return (it != paths_by_id.end()) ? it->second : std::string{};
+    };
+
+    auto lookup_entity_usr = [](const std::unordered_map<int64_t, std::string>& usr_by_id,
+                                int64_t local_id) -> std::string {
+        if (local_id == 0) {
+            return {};
+        }
+        auto it = usr_by_id.find(local_id);
+        return (it != usr_by_id.end()) ? it->second : std::string{};
+    };
+
     for (const auto* tu : tus) {
         if (!tu) continue;
 
@@ -1397,9 +1508,37 @@ void register_project_tables(xsql::Database& db,
         FileMap file_map = build_file_map(*tu);
         EntityMap entity_map = build_entity_map(*tu);
 
+        std::unordered_map<int64_t, std::string> local_file_paths;
+        for (const auto& [path, id] : file_map.path_to_id) {
+            local_file_paths[id] = path;
+        }
+
+        // Free-function USRs only — method USRs go in local_method_usrs so that
+        // child rows can route `function_id` vs `method_id` without collisions.
+        std::unordered_map<int64_t, std::string> local_function_usrs;
+        for (const auto& [usr, id] : entity_map.free_func_usr_to_id) {
+            local_function_usrs[id] = usr;
+        }
+
+        std::unordered_map<int64_t, std::string> local_method_usrs;
+        for (const auto& [usr, id] : entity_map.method_usr_to_id) {
+            local_method_usrs[id] = usr;
+        }
+
+        std::unordered_map<int64_t, std::string> local_class_usrs;
+        for (const auto& [usr, id] : entity_map.class_usr_to_id) {
+            local_class_usrs[id] = usr;
+        }
+
+        std::unordered_map<int64_t, std::string> local_enum_usrs;
+        for (const auto& [usr, id] : entity_map.enum_usr_to_id) {
+            local_enum_usrs[id] = usr;
+        }
+
         // Files (deduplicate by path)
         auto tu_files = build_files_table_with_map(*tu, file_map);
         for (auto& row : tu_files) {
+            row.id = assign_global_id(global_file_ids, row.path, next_file_id);
             if (seen_files.find(row.path) == seen_files.end()) {
                 seen_files.insert(row.path);
                 files_data->push_back(std::move(row));
@@ -1409,6 +1548,16 @@ void register_project_tables(xsql::Database& db,
         // Functions (deduplicate by USR)
         auto tu_functions = build_functions_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_functions) {
+            std::string key = row.usr.empty()
+                ? tu->path() + "#function#" + std::to_string(row.id)
+                : row.usr;
+            row.id = assign_global_id(global_function_ids, key, next_function_id);
+
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
+
             if (row.usr.empty() || seen_functions.find(row.usr) == seen_functions.end()) {
                 if (!row.usr.empty()) seen_functions.insert(row.usr);
                 functions_data->push_back(std::move(row));
@@ -1418,17 +1567,37 @@ void register_project_tables(xsql::Database& db,
         // Classes (deduplicate by USR)
         auto tu_classes = build_classes_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_classes) {
+            std::string key = row.usr.empty()
+                ? tu->path() + "#class#" + std::to_string(row.id)
+                : row.usr;
+            row.id = assign_global_id(global_class_ids, key, next_class_id);
+
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
+
             if (row.usr.empty() || seen_classes.find(row.usr) == seen_classes.end()) {
                 if (!row.usr.empty()) seen_classes.insert(row.usr);
                 classes_data->push_back(std::move(row));
             }
         }
 
-        // Methods (deduplicate by USR)
+        // Methods (deduplicate by USR). Methods live in their own id space
+        // (disjoint from free functions) so children that reference them carry
+        // a separate `method_id` FK.
         auto tu_methods = build_methods_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_methods) {
-            if (row.usr.empty() || seen_methods.find(row.usr) == seen_methods.end()) {
-                if (!row.usr.empty()) seen_methods.insert(row.usr);
+            // row.usr is guaranteed non-empty: build_methods_table_with_map
+            // drops any cursor not registered in entity_map.method_usr_to_id.
+            row.id = assign_global_id(global_method_ids, row.usr, next_method_id);
+
+            std::string class_usr = lookup_entity_usr(local_class_usrs, row.class_id);
+            if (!class_usr.empty()) {
+                row.class_id = assign_global_id(global_class_ids, class_usr, next_class_id);
+            }
+            if (seen_methods.find(row.usr) == seen_methods.end()) {
+                seen_methods.insert(row.usr);
                 methods_data->push_back(std::move(row));
             }
         }
@@ -1436,27 +1605,65 @@ void register_project_tables(xsql::Database& db,
         // Fields (keep all - they're tied to classes)
         auto tu_fields = build_fields_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_fields) {
+            std::string class_usr = lookup_entity_usr(local_class_usrs, row.class_id);
+            if (!class_usr.empty()) {
+                row.class_id = assign_global_id(global_class_ids, class_usr, next_class_id);
+            }
             fields_data->push_back(std::move(row));
         }
 
         // Variables (deduplicate by USR)
         auto tu_variables = build_variables_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_variables) {
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
+
+            std::string function_usr = lookup_entity_usr(local_function_usrs, row.function_id);
+            if (!function_usr.empty()) {
+                row.function_id = assign_global_id(global_function_ids, function_usr, next_function_id);
+            }
+
+            std::string method_usr = lookup_entity_usr(local_method_usrs, row.method_id);
+            if (!method_usr.empty()) {
+                row.method_id = assign_global_id(global_method_ids, method_usr, next_method_id);
+            }
+
             if (row.usr.empty() || seen_variables.find(row.usr) == seen_variables.end()) {
                 if (!row.usr.empty()) seen_variables.insert(row.usr);
                 variables_data->push_back(std::move(row));
             }
         }
 
-        // Parameters (keep all - they're tied to functions)
+        // Parameters (keep all - they're tied to free functions or methods)
         auto tu_parameters = build_parameters_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_parameters) {
+            std::string function_usr = lookup_entity_usr(local_function_usrs, row.function_id);
+            if (!function_usr.empty()) {
+                row.function_id = assign_global_id(global_function_ids, function_usr, next_function_id);
+            }
+
+            std::string method_usr = lookup_entity_usr(local_method_usrs, row.method_id);
+            if (!method_usr.empty()) {
+                row.method_id = assign_global_id(global_method_ids, method_usr, next_method_id);
+            }
             parameters_data->push_back(std::move(row));
         }
 
         // Enums (deduplicate by USR)
         auto tu_enums = build_enums_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_enums) {
+            std::string key = row.usr.empty()
+                ? tu->path() + "#enum#" + std::to_string(row.id)
+                : row.usr;
+            row.id = assign_global_id(global_enum_ids, key, next_enum_id);
+
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
+
             if (row.usr.empty() || seen_enums.find(row.usr) == seen_enums.end()) {
                 if (!row.usr.empty()) seen_enums.insert(row.usr);
                 enums_data->push_back(std::move(row));
@@ -1466,18 +1673,30 @@ void register_project_tables(xsql::Database& db,
         // Enum values (keep all - they're tied to enums)
         auto tu_enum_values = build_enum_values_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_enum_values) {
+            std::string enum_usr = lookup_entity_usr(local_enum_usrs, row.enum_id);
+            if (!enum_usr.empty()) {
+                row.enum_id = assign_global_id(global_enum_ids, enum_usr, next_enum_id);
+            }
             enum_values_data->push_back(std::move(row));
         }
 
         // Calls (keep all - each call site is unique)
         auto tu_calls = build_calls_table_with_map(*tu, file_map);
         for (auto& row : tu_calls) {
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
             calls_data->push_back(std::move(row));
         }
 
         // Inheritance (deduplicate by derived_usr:base_usr pair)
         auto tu_inheritance = build_inheritance_table_with_map(*tu, file_map);
         for (auto& row : tu_inheritance) {
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
             std::string key = row.derived_usr + ":" + row.base_usr;
             if (seen_inheritance.find(key) == seen_inheritance.end()) {
                 seen_inheritance.insert(key);
@@ -1485,38 +1704,61 @@ void register_project_tables(xsql::Database& db,
             }
         }
 
-        // String literals (keep all - each occurrence is unique)
+        // String literals (keep all - each occurrence is unique). The builder
+        // has already routed the enclosing callable into either func_id (free
+        // function) or method_id (method); we just remap the one that's set.
         auto tu_strings = build_string_literals_table_with_map(*tu, file_map, entity_map);
         for (auto& row : tu_strings) {
+            std::string file_path = lookup_file_path(local_file_paths, row.file_id);
+            if (!file_path.empty()) {
+                row.file_id = assign_global_id(global_file_ids, file_path, next_file_id);
+            }
+
+            std::string function_usr = lookup_entity_usr(local_function_usrs, row.func_id);
+            if (!function_usr.empty()) {
+                row.func_id = assign_global_id(global_function_ids, function_usr, next_function_id);
+            }
+
+            std::string method_usr = lookup_entity_usr(local_method_usrs, row.method_id);
+            if (!method_usr.empty()) {
+                row.method_id = assign_global_id(global_method_ids, method_usr, next_method_id);
+            }
             string_literals_data->push_back(std::move(row));
         }
     }
 
-    // Re-assign IDs to ensure they're sequential
+    // Parent IDs (files, functions, classes, methods, enums) are already
+    // assigned from stable USR/path keys above and are naturally gap-free
+    // because only emitted rows allocate into their global id maps. Child
+    // tables below have no stable primary key, so resequence their ids.
     int64_t id = 1;
-    for (auto& row : *files_data) row.id = id++;
+    for (auto& row : *fields_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *functions_data) row.id = id++;
+    for (auto& row : *variables_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *classes_data) row.id = id++;
+    for (auto& row : *parameters_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *methods_data) row.id = id++;
+    for (auto& row : *enum_values_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *fields_data) row.id = id++;
+    for (auto& row : *calls_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *variables_data) row.id = id++;
+    for (auto& row : *inheritance_data) {
+        row.id = id++;
+    }
     id = 1;
-    for (auto& row : *parameters_data) row.id = id++;
-    id = 1;
-    for (auto& row : *enums_data) row.id = id++;
-    id = 1;
-    for (auto& row : *enum_values_data) row.id = id++;
-    id = 1;
-    for (auto& row : *calls_data) row.id = id++;
-    id = 1;
-    for (auto& row : *inheritance_data) row.id = id++;
-    id = 1;
-    for (auto& row : *string_literals_data) row.id = id++;
+    for (auto& row : *string_literals_data) {
+        row.id = id++;
+    }
 
     // Register tables (same as single TU, but with combined data)
     std::string prefix = schema.empty() ? "" : schema + "_";
@@ -1633,6 +1875,7 @@ void register_project_tables(xsql::Database& db,
         .column_int64("file_id", [](const VariableRow& r) { return r.file_id; })
         .column_int("line", [](const VariableRow& r) { return static_cast<int>(r.line); })
         .column_int64("function_id", [](const VariableRow& r) { return r.function_id; })
+        .column_int64("method_id", [](const VariableRow& r) { return r.method_id; })
         .column_int64("namespace_id", [](const VariableRow& r) { return r.namespace_id; })
         .column_text("scope_kind", [](const VariableRow& r) { return r.scope_kind; })
         .column_text("storage_class", [](const VariableRow& r) { return r.storage_class; })
@@ -1649,6 +1892,7 @@ void register_project_tables(xsql::Database& db,
         })
         .column_int64("id", [](const ParameterRow& r) { return r.id; })
         .column_int64("function_id", [](const ParameterRow& r) { return r.function_id; })
+        .column_int64("method_id", [](const ParameterRow& r) { return r.method_id; })
         .column_text("name", [](const ParameterRow& r) { return r.name; })
         .column_text("type", [](const ParameterRow& r) { return r.type; })
         .column_int("index_", [](const ParameterRow& r) { return r.index; })
@@ -1732,6 +1976,7 @@ void register_project_tables(xsql::Database& db,
         .column_int("column", [](const StringLiteralRow& r) { return static_cast<int>(r.column); })
         .column_text("function_usr", [](const StringLiteralRow& r) { return r.function_usr; })
         .column_int64("func_id", [](const StringLiteralRow& r) { return r.func_id; })
+        .column_int64("method_id", [](const StringLiteralRow& r) { return r.method_id; })
         .column_int("is_wide", [](const StringLiteralRow& r) { return r.is_wide ? 1 : 0; })
         .column_int("is_system", [](const StringLiteralRow& r) { return r.is_system ? 1 : 0; })
         .build();

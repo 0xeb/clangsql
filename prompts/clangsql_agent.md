@@ -205,20 +205,26 @@ All tables have `is_system` column (1=system header, 0=user code).
 | type | TEXT | Type |
 | file_id | INT | FK to files |
 | line | INT | Line number |
-| function_id | INT | FK to functions (NULL for globals) |
+| function_id | INT | FK to **functions** (0 when parent is a method or when global) |
+| method_id | INT | FK to **methods** (0 when parent is a free function or when global) |
 | scope_kind | TEXT | "global", "local", "static_local" |
 | storage_class | TEXT | "static", "extern", "none" |
 | is_const | INT | 1=const |
+
+Exactly one of `function_id` / `method_id` is non-zero for locals; both are 0 for globals.
 
 ### parameters
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INT | Primary key |
-| function_id | INT | FK to functions/methods |
+| function_id | INT | FK to **functions** (0 when owner is a method) |
+| method_id | INT | FK to **methods** (0 when owner is a free function) |
 | name | TEXT | Parameter name |
 | type | TEXT | Parameter type |
 | index_ | INT | 0-based position |
 | has_default | INT | 1=has default value |
+
+Exactly one of `function_id` / `method_id` is non-zero per parameter. Free-function parameters join `functions`; method/constructor/destructor parameters join `methods`.
 
 ### enums
 | Column | Type | Description |
@@ -267,7 +273,7 @@ Class hierarchy.
 | file_id | INT | FK to files (project mode) |
 
 ### string_literals
-String constants found in code, with direct FK to enclosing function for fast queries.
+String constants found in code, with direct FKs to the enclosing callable for fast queries.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -276,17 +282,23 @@ String constants found in code, with direct FK to enclosing function for fast qu
 | file_id | INT | FK to files |
 | line | INT | Line number |
 | column | INT | Column number |
-| function_usr | TEXT | Enclosing function USR (empty if global) |
-| func_id | INT | **FK to functions** (0 if global) - fast queries! |
+| function_usr | TEXT | Enclosing callable USR (empty if global) |
+| func_id | INT | **FK to functions** (0 when enclosing is a method or global) |
+| method_id | INT | **FK to methods** (0 when enclosing is a free function or global) |
 | is_wide | INT | 1=wide string (L"...") |
 | is_system | INT | 1=system header |
 
-**Fast String Queries (use func_id, not line ranges!):**
+Exactly one of `func_id` / `method_id` is non-zero for strings inside a callable; both are 0 for global strings. Join the appropriate parent table based on which column is set.
+
+**Fast String Queries:**
 ```sql
--- All strings in a specific function (O(1) lookup)
+-- All strings in a specific free function (O(1) lookup)
 SELECT content FROM string_literals WHERE func_id = 42;
 
--- Which function has the most string literals? (fast GROUP BY)
+-- All strings in a specific method (O(1) lookup)
+SELECT content FROM string_literals WHERE method_id = 7;
+
+-- Which free function has the most string literals? (fast GROUP BY)
 SELECT f.name, COUNT(*) as count
 FROM string_literals s
 JOIN functions f ON s.func_id = f.id
@@ -294,14 +306,38 @@ WHERE s.is_system = 0 AND f.is_system = 0
 GROUP BY s.func_id
 ORDER BY count DESC LIMIT 10;
 
--- Functions with hardcoded "password" strings
+-- Which method has the most string literals?
+SELECT m.qualified_name, COUNT(*) as count
+FROM string_literals s
+JOIN methods m ON s.method_id = m.id
+WHERE s.is_system = 0 AND m.is_system = 0
+GROUP BY s.method_id
+ORDER BY count DESC LIMIT 10;
+
+-- Free functions with hardcoded "password" strings
 SELECT DISTINCT f.name
 FROM string_literals s
 JOIN functions f ON s.func_id = f.id
 WHERE s.content LIKE '%password%' AND s.is_system = 0;
 
--- Global strings (not inside any function)
-SELECT content FROM string_literals WHERE func_id = 0 AND is_system = 0;
+-- Methods with hardcoded "password" strings
+SELECT DISTINCT m.qualified_name
+FROM string_literals s
+JOIN methods m ON s.method_id = m.id
+WHERE s.content LIKE '%password%' AND s.is_system = 0;
+
+-- All callables (free functions and methods) with "password"
+SELECT 'function' AS kind, f.name FROM string_literals s
+  JOIN functions f ON s.func_id = f.id
+  WHERE s.content LIKE '%password%' AND s.is_system = 0
+UNION ALL
+SELECT 'method' AS kind, m.qualified_name FROM string_literals s
+  JOIN methods m ON s.method_id = m.id
+  WHERE s.content LIKE '%password%' AND s.is_system = 0;
+
+-- Global strings (not inside any callable)
+SELECT content FROM string_literals
+WHERE func_id = 0 AND method_id = 0 AND is_system = 0;
 ```
 
 ## Common Queries
@@ -426,12 +462,19 @@ WHERE m.is_const = 1 AND c.is_system = 0;
 ### Code Metrics
 
 ```sql
--- Functions by complexity (parameter count)
+-- Free functions by parameter count
 SELECT f.name, COUNT(p.id) as param_count
 FROM functions f
 LEFT JOIN parameters p ON p.function_id = f.id
 WHERE f.is_system = 0
 GROUP BY f.id ORDER BY param_count DESC LIMIT 20;
+
+-- Methods by parameter count
+SELECT m.qualified_name, COUNT(p.id) as param_count
+FROM methods m
+LEFT JOIN parameters p ON p.method_id = m.id
+WHERE m.is_system = 0
+GROUP BY m.id ORDER BY param_count DESC LIMIT 20;
 
 -- Classes by size (field count)
 SELECT c.name, COUNT(f.id) as field_count
@@ -455,11 +498,17 @@ GROUP BY return_type ORDER BY count DESC LIMIT 10;
 ### Static Analysis Patterns
 
 ```sql
--- Unused parameters (unnamed)
+-- Unused parameters (unnamed) on free functions
 SELECT f.name as function, p.type as param_type
 FROM parameters p
 JOIN functions f ON p.function_id = f.id
 WHERE (p.name = '' OR p.name IS NULL) AND f.is_system = 0;
+
+-- Unused parameters (unnamed) on methods
+SELECT m.qualified_name as method, p.type as param_type
+FROM parameters p
+JOIN methods m ON p.method_id = m.id
+WHERE (p.name = '' OR p.name IS NULL) AND m.is_system = 0;
 
 -- Methods that might be const (non-const, non-setter)
 SELECT c.name, m.name
@@ -564,14 +613,14 @@ Standard REST API that works with curl, any HTTP client, or LLM tools.
 
 **Starting the server:**
 ```bash
-# Default port 8081
+# Default port 8080
 clangsql main.cpp --http
 
 # Custom port and bind address
 clangsql main.cpp --http 9000 --bind 0.0.0.0
 
 # With authentication
-clangsql main.cpp --http 8081 --token mysecret
+clangsql main.cpp --http 8080 --token mysecret
 ```
 
 **HTTP Endpoints:**
@@ -589,18 +638,18 @@ clangsql main.cpp --http 8081 --token mysecret
 **Example with curl:**
 ```bash
 # Get API documentation
-curl http://localhost:8081/help
+curl http://localhost:8080/help
 
 # Execute SQL query
-curl -X POST http://localhost:8081/query -d "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
+curl -X POST http://localhost:8080/query -d "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
 
 # With authentication
-curl -X POST http://localhost:8081/query \
+curl -X POST http://localhost:8080/query \
      -H "Authorization: Bearer mysecret" \
      -d "SELECT * FROM classes"
 
 # Check status
-curl http://localhost:8081/status
+curl http://localhost:8080/status
 ```
 
 **Response Format (JSON):**

@@ -19,6 +19,6 @@
 namespace clangsql {
 
 /// Library version
-constexpr const char* VERSION = "0.1.0";
+constexpr const char* VERSION = "0.0.2";
 
 } // namespace clangsql

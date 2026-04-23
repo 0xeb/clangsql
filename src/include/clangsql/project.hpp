@@ -20,6 +20,78 @@
 
 namespace clangsql {
 
+namespace detail {
+
+inline std::string glob_to_regex(const std::string& glob) {
+    std::string regex;
+    regex.reserve(glob.size() * 2);
+
+    for (size_t i = 0; i < glob.size(); ++i) {
+        char c = glob[i];
+        switch (c) {
+            case '*':
+                if (i + 1 < glob.size() && glob[i + 1] == '*') {
+                    regex += ".*";
+                    ++i;
+                } else {
+                    regex += "[^/\\\\]*";
+                }
+                break;
+            case '?':
+                regex += "[^/\\\\]";
+                break;
+            case '.':
+            case '(':
+            case ')':
+            case '[':
+            case ']':
+            case '{':
+            case '}':
+            case '+':
+            case '^':
+            case '$':
+            case '|':
+            case '\\':
+                regex += '\\';
+                regex += c;
+                break;
+            default:
+                regex += c;
+        }
+    }
+    regex += '$';
+
+    return regex;
+}
+
+inline bool matches_basename_glob(const std::string& filename,
+                                  const std::string& pattern) {
+    try {
+        std::regex re(glob_to_regex(pattern), std::regex::icase);
+        return std::regex_match(filename, re);
+    } catch (const std::regex_error&) {
+        if (pattern.size() > 1 && pattern[0] == '*') {
+            std::string suffix = pattern.substr(1);
+            return filename.size() >= suffix.size() &&
+                   filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+        }
+    }
+
+    return filename == pattern;
+}
+
+inline bool matches_any_basename_glob(const std::string& filename,
+                                      const std::vector<std::string>& patterns) {
+    for (const auto& pattern : patterns) {
+        if (matches_basename_glob(filename, pattern)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace detail
+
 /// Configuration for project-level parsing
 struct ProjectConfig {
     std::filesystem::path root_path;                    ///< Project root directory
@@ -160,24 +232,7 @@ inline std::vector<std::string> Project::flags_for(const std::string& /*file*/) 
 
 inline bool Project::matches_patterns(const std::string& filename,
                                        const std::vector<std::string>& patterns) {
-    for (const auto& pattern : patterns) {
-        try {
-            std::regex re(glob_to_regex(pattern), std::regex::icase);
-            if (std::regex_match(filename, re)) {
-                return true;
-            }
-        } catch (const std::regex_error&) {
-            // Invalid pattern, try simple suffix match
-            if (pattern.size() > 1 && pattern[0] == '*') {
-                std::string suffix = pattern.substr(1);
-                if (filename.size() >= suffix.size() &&
-                    filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
+    return detail::matches_any_basename_glob(filename, patterns);
 }
 
 inline bool Project::should_exclude(const std::filesystem::path& path,
@@ -195,45 +250,7 @@ inline bool Project::should_exclude(const std::filesystem::path& path,
 }
 
 inline std::string Project::glob_to_regex(const std::string& glob) {
-    std::string regex;
-    regex.reserve(glob.size() * 2);
-
-    for (size_t i = 0; i < glob.size(); ++i) {
-        char c = glob[i];
-        switch (c) {
-            case '*':
-                if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                    regex += ".*";
-                    ++i;
-                } else {
-                    regex += "[^/\\\\]*";
-                }
-                break;
-            case '?':
-                regex += "[^/\\\\]";
-                break;
-            case '.':
-            case '(':
-            case ')':
-            case '[':
-            case ']':
-            case '{':
-            case '}':
-            case '+':
-            case '^':
-            case '$':
-            case '|':
-            case '\\':
-                regex += '\\';
-                regex += c;
-                break;
-            default:
-                regex += c;
-        }
-    }
-    regex += '$';
-
-    return regex;
+    return detail::glob_to_regex(glob);
 }
 
 } // namespace clangsql

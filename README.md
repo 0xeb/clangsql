@@ -142,6 +142,76 @@ clangsql --clear-cache
 
 **What's validated:** Cache is invalidated when source files, any included headers, compiler args, or Clang version change. Each file's mtime is checked, so only modified files are re-parsed.
 
+## Analyzing a CMake Project
+
+Any CMake project can generate a `compile_commands.json` — a database of exact compiler flags for every source file. clangsql uses this to parse your code with the correct includes, defines, and standards, just like your compiler sees it.
+
+### Step 1: Generate compile_commands.json
+
+Add `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` when configuring your project. This requires a single-config generator like **Ninja** or **Unix Makefiles** (Visual Studio generators don't produce it):
+
+```bash
+# Using clangsql's own source as the example project:
+cd clangsql
+cmake -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+```
+
+This creates `build/compile_commands.json` — a JSON array with one entry per source file containing the exact compiler command, flags, and include paths.
+
+### Step 2: Query with clangsql
+
+```bash
+# Point clangsql at the compile_commands.json
+clangsql --compile-commands build/compile_commands.json -i
+
+# Or just point at the build directory (auto-finds compile_commands.json)
+clangsql --build-dir build -i
+```
+
+Each source file from the database is attached as a schema-prefixed set of tables (e.g., `main_functions`, `tables_functions`). You can query individual files or join across them.
+
+### Step 3: Query your code
+
+```sql
+-- List all parsed source files
+SELECT name FROM pragma_database_list WHERE name != 'main';
+
+-- Functions defined in a specific file
+SELECT name, return_type, line FROM tables_functions WHERE is_system = 0;
+
+-- All user-defined classes across the project
+SELECT name, kind FROM main_classes WHERE is_system = 0
+UNION ALL
+SELECT name, kind FROM tables_classes WHERE is_system = 0;
+```
+
+### Project mode (unified schema)
+
+For a single merged view without schema prefixes, use `--project` with `--build-dir` to combine directory scanning with compile_commands.json flags:
+
+```bash
+# Unified schema — all files merged into one set of tables
+clangsql --project src --build-dir build --cache -i
+```
+
+```sql
+-- Now tables have no prefix — one unified view
+SELECT name, return_type FROM functions WHERE is_system = 0;
+
+-- Functions with their source files
+SELECT f.name, fi.path
+FROM functions f JOIN files fi ON f.file_id = fi.id
+WHERE f.is_system = 0
+ORDER BY fi.path, f.line;
+```
+
+### Tips
+
+- **Use `--cache`** for repeated queries — first parse writes the cache, subsequent runs skip unchanged files.
+- **Use `--exclude`** to skip directories like `build`, `third_party`, or `external` in project mode.
+- **Filter with `is_system = 0`** — without it, you'll get thousands of symbols from system headers.
+- **Ninja is recommended** over Makefiles for faster builds and better compile_commands.json support on all platforms.
+
 ## AI Agent Mode
 
 Query your codebase using natural language.

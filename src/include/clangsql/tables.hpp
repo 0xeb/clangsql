@@ -109,7 +109,8 @@ struct VariableRow {
     std::string type;
     int64_t file_id;
     unsigned line;
-    int64_t function_id;  // NULL for globals
+    int64_t function_id;     // Free-function parent id; 0 when parent is a method or global
+    int64_t method_id;       // Method parent id; 0 when parent is a free function or global
     int64_t namespace_id;
     std::string scope_kind;  // "global", "local", "static_local"
     std::string storage_class;
@@ -121,7 +122,8 @@ struct VariableRow {
 /// Row for the 'parameters' table
 struct ParameterRow {
     int64_t id;
-    int64_t function_id;
+    int64_t function_id;  // Free-function parent id; 0 when parent is a method
+    int64_t method_id;    // Method parent id; 0 when parent is a free function
     std::string name;
     std::string type;
     int index;
@@ -183,8 +185,9 @@ struct StringLiteralRow {
     int64_t file_id;            ///< File containing the string
     unsigned line;              ///< Line number
     unsigned column;            ///< Column number
-    std::string function_usr;   ///< Enclosing function USR (empty if global)
-    int64_t func_id;            ///< Enclosing function ID (0 if global) - for fast queries
+    std::string function_usr;   ///< Enclosing callable USR (empty if global)
+    int64_t func_id;            ///< Enclosing free-function id (0 if global or method-scope)
+    int64_t method_id;          ///< Enclosing method id (0 if global or free-function-scope)
     bool is_wide;               ///< True for L"string"
     bool is_system;             ///< True if in system header
 };
