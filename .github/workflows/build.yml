@@ -50,6 +50,11 @@ jobs:
           sudo ./llvm.sh ${{ matrix.llvm_version }}
           sudo apt-get install -y libclang-${{ matrix.llvm_version }}-dev
           echo "LLVM_DIR=/usr/lib/llvm-${{ matrix.llvm_version }}" >> $GITHUB_ENV
+          # Point find_package(Clang) at the right cmake config — the runner
+          # has clang-17 pre-installed whose static archives are incomplete;
+          # without an explicit Clang_DIR, cmake picks the system clang-17
+          # config and fails on missing libclangBasic.a etc.
+          echo "Clang_DIR=/usr/lib/llvm-${{ matrix.llvm_version }}/lib/cmake/clang" >> $GITHUB_ENV
 
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
@@ -71,8 +76,11 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_DIR="$LLVM_DIR"
+          ARGS=(-B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="$LLVM_DIR")
+          if [ -n "${Clang_DIR:-}" ]; then
+            ARGS+=(-DClang_DIR="$Clang_DIR")
+          fi
+          cmake "${ARGS[@]}"
 
       - name: Build
         shell: bash
