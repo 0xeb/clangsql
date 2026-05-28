@@ -653,13 +653,24 @@ curl http://localhost:8080/status
 ```
 
 **Response Format (JSON):**
-```json
-{"success": true, "columns": ["name"], "rows": [["main"]], "row_count": 1}
-```
+
+All `/query` responses use the canonical script envelope — single statement = array of one entry:
 
 ```json
-{"success": false, "error": "no such table: bad_table"}
+{
+  "success": true,
+  "statement_count": <N>,
+  "results": [
+    { "statement_index": 0, "success": true, "columns": [...], "rows": [...],
+      "row_count": <N>, "elapsed_ms": <ms>, "error": null }
+  ],
+  "row_count_total": <N>,
+  "elapsed_ms_total": <ms>,
+  "first_error_index": null
+}
 ```
+
+Bodies can be multi-statement (semicolon-separated); each `results[i]` has its own `columns`/`rows`/`row_count`/`error`. Fail-fast is the default; pass `?continue_on_error=1` to run every statement regardless of earlier failures. On splitter failure (e.g. unterminated quote) the response is `success:false`, `statement_count:0`, `results:[]`, plus a top-level `parse_error`.
 
 ---
 

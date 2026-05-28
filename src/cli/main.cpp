@@ -12,6 +12,7 @@
 #include <clangsql/session.hpp>
 #include <clangsql/compile_commands.hpp>
 #include <clangsql/project.hpp>
+#include <xsql/query_script.hpp>
 #if defined(CLANGSQL_HAS_HTTP) && !defined(CLANGSQL_HAS_AI_AGENT)
 #include "http_server.hpp"
 #endif
@@ -902,8 +903,19 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
 
     auto query_cb = [&session, &query_mutex](const std::string& sql) -> std::string {
         std::lock_guard<std::mutex> lock(query_mutex);
-        auto result = session.query(sql);
-        return query_result_to_json(result);
+        auto script = xsql::run_script(sql, {},
+            [&session](const std::string& stmt, xsql::ScriptStatementResult& out) {
+                auto r = session.query(stmt);
+                out.columns = r.columns;
+                out.rows.reserve(r.rows.size());
+                for (const auto& row : r.rows) {
+                    out.rows.push_back(row.values);
+                }
+                out.elapsed_ms = static_cast<double>(r.elapsed_ms);
+                out.success = r.error.empty();
+                out.error = r.error;
+            });
+        return xsql::script_result_to_json(script);
     };
 
     int actual_port = http_server.start(port, query_cb, actual_bind, false);
