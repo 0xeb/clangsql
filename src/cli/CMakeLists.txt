@@ -26,6 +26,12 @@ endif()
 add_executable(clangsql_cli ${CLI_SOURCES})
 set_target_properties(clangsql_cli PROPERTIES OUTPUT_NAME clangsql)
 
+# Windows VS_VERSION_INFO resource
+xsql_add_versioninfo(clangsql_cli
+    FILETYPE          VFT_APP
+    DESCRIPTION       "clangsql command-line interface for Clang AST"
+    ORIGINAL_FILENAME "clangsql.exe")
+
 # Include generated files directory
 target_include_directories(clangsql_cli PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 

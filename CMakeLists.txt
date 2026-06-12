@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
-project(clangsql VERSION 0.0.3 LANGUAGES C CXX)
+project(clangsql VERSION 0.0.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Windows VERSIONINFO wiring (version is from project() above)
+set(TOOL_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(TOOL_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(TOOL_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/versioninfo.cmake)
 
 # Output directories (only set if building standalone)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

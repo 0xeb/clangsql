@@ -135,6 +135,7 @@ All tables have `is_system` column (1=system header, 0=user code).
 | id | INT | Primary key |
 | path | TEXT | Full file path |
 | is_main_file | INT | 1=main TU file |
+| mtime | INT | File modification time (Unix epoch seconds) |
 | is_header | INT | 1=header file |
 | is_system | INT | 1=system include |
 
@@ -166,6 +167,7 @@ All tables have `is_system` column (1=system header, 0=user code).
 | line | INT | Line number |
 | is_definition | INT | 1=definition |
 | is_abstract | INT | 1=has pure virtual |
+| namespace_id | INT | FK to enclosing namespace (0 = global) |
 
 ### methods
 | Column | Type | Description |
@@ -181,6 +183,8 @@ All tables have `is_system` column (1=system header, 0=user code).
 | is_pure_virtual | INT | 1=pure virtual (= 0) |
 | is_static | INT | 1=static method |
 | is_const | INT | 1=const method |
+| is_override | INT | 1=marked `override` |
+| is_final | INT | 1=marked `final` |
 | line, column, end_line, end_column | INT | Position |
 
 ### fields
@@ -207,9 +211,11 @@ All tables have `is_system` column (1=system header, 0=user code).
 | line | INT | Line number |
 | function_id | INT | FK to **functions** (0 when parent is a method or when global) |
 | method_id | INT | FK to **methods** (0 when parent is a free function or when global) |
+| namespace_id | INT | FK to enclosing namespace (0 = global / non-namespace scope) |
 | scope_kind | TEXT | "global", "local", "static_local" |
 | storage_class | TEXT | "static", "extern", "none" |
 | is_const | INT | 1=const |
+| is_inline | INT | 1=inline (`inline` keyword) |
 
 Exactly one of `function_id` / `method_id` is non-zero for locals; both are 0 for globals.
 
@@ -339,6 +345,12 @@ SELECT 'method' AS kind, m.qualified_name FROM string_literals s
 SELECT content FROM string_literals
 WHERE func_id = 0 AND method_id = 0 AND is_system = 0;
 ```
+
+## Aggregates (libxsql built-in)
+
+`blob_concat(value)` concatenates BLOB inputs and INTEGER 0-255 values
+into one BLOB. NULL inputs are skipped; TEXT or out-of-range INTs error.
+Use over an ordered row source.
 
 ## Common Queries
 
