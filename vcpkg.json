@@ -1,10 +1,10 @@
 {
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
     "name": "clangsql",
-    "version": "0.0.3",
+    "version": "0.0.5",
     "description": "SQL interface for Clang AST databases",
     "homepage": "https://github.com/0xeb/clangsql",
-    "license": "MIT",
+    "license": "LicenseRef-Human-Origin-Source-1.0",
     "dependencies": [
         {
             "name": "llvm",

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /// @file tables.cpp
 /// @brief Virtual table implementations for clangsql
@@ -1209,6 +1208,8 @@ void register_tables(xsql::Database& db, const TranslationUnit& tu,
     // Use schema as table name prefix (e.g., "main" -> "main_functions")
     // Empty schema means no prefix (backward compatible)
     std::string prefix = schema.empty() ? "" : schema + "_";
+
+    // Shared cache: the Clang AST is immutable per session, so caching across queries is safe.
 
     // Files table
     auto files_def = xsql::cached_table<FileRow>((prefix + "files").c_str())

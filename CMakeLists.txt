@@ -1,5 +1,12 @@
+#
+# Copyright (c) 2024-2026 Elias Bachaalany
+# SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
+#
+# This file is licensed under the Human-Origin Source License v1.0.
+# See LICENSE.
+#
 cmake_minimum_required(VERSION 3.20)
-project(clangsql VERSION 0.0.4 LANGUAGES C CXX)
+project(clangsql VERSION 0.0.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,26 +126,35 @@ endif()
 # nlohmann/json is provided by libxsql (xsql::json)
 
 # ============================================================================
-# AI Agent Support (optional, requires libagents)
+# MCP Support (optional, uses fastmcpp)
 # ============================================================================
 
-option(CLANGSQL_WITH_AI_AGENT "Enable AI agent support" ON)
+option(CLANGSQL_WITH_MCP "Build with MCP server support (fastmcpp)" ON)
 
-if(CLANGSQL_WITH_AI_AGENT)
-    if(TARGET libagents)
-        message(STATUS "clangsql: Using libagents from parent project")
-    else()
-        message(STATUS "clangsql: Fetching libagents from GitHub...")
-        set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
+if(CLANGSQL_WITH_MCP)
+    message(STATUS "clangsql: Building with MCP support via fastmcpp")
+
+    # Reuse an existing fastmcpp target when available in a parent build.
+    if(NOT TARGET fastmcpp_core)
+        # Keep the dependency surface minimal for clangsql.
+        set(FASTMCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_ENABLE_POST_STREAMING OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_ENABLE_SAMPLING_HTTP_HANDLERS OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_FETCH_CURL OFF CACHE BOOL "" FORCE)
+
+        message(STATUS "clangsql: Fetching fastmcpp from GitHub...")
         include(FetchContent)
-        FetchContent_Declare(libagents
-            GIT_REPOSITORY https://github.com/0xeb/libagents.git
+        FetchContent_Declare(fastmcpp
+            GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
             GIT_TAG        main
             GIT_SHALLOW    TRUE
         )
-        FetchContent_MakeAvailable(libagents)
+        FetchContent_MakeAvailable(fastmcpp)
+    endif()
+
+    if(MSVC AND TARGET fastmcpp_core)
+        target_compile_options(fastmcpp_core PRIVATE /MP)
     endif()
 endif()
 
@@ -156,12 +172,6 @@ endif()
 # ============================================================================
 
 add_subdirectory(src)
-
-# Examples (off by default, enable with -DCLANGSQL_BUILD_EXAMPLES=ON)
-option(CLANGSQL_BUILD_EXAMPLES "Build example projects" OFF)
-if(CLANGSQL_BUILD_EXAMPLES)
-    add_subdirectory(examples/sample_project)
-endif()
 
 
 # ============================================================================

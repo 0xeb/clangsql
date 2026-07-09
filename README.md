@@ -9,7 +9,6 @@ Part of the [xsql](https://github.com/0xeb/xsql) project family.
 - Parse C/C++ source files with libclang
 - Query AST entities via SQL: functions, classes, methods, variables, enums
 - Multi-translation-unit support with schema prefixes
-- AI agent mode for natural language queries (Claude, Copilot)
 - AST caching for fast repeated queries
 - HTTP and MCP server modes for remote analysis
 - Cross-platform: Windows, macOS, Linux
@@ -50,9 +49,8 @@ clangsql <files...> [options] [clang-args...]
 |------|---------|-------------|
 | Query | `clangsql file.cpp -e "SQL"` | Execute query, exit |
 | REPL | `clangsql file.cpp -i` | Interactive mode |
-| Agent | `clangsql file.cpp --agent -i` | AI-assisted analysis |
-| Prompt | `clangsql file.cpp --prompt "..."` | Single-shot AI query |
 | HTTP | `clangsql file.cpp --http [port]` | Host SQL over HTTP |
+| MCP | `clangsql file.cpp --mcp [port]` | Host SQL over MCP (SSE) |
 
 ### Options
 
@@ -60,13 +58,10 @@ clangsql <files...> [options] [clang-args...]
 Local Options:
   -e <sql>           Execute SQL query and exit
   -i                 Interactive mode (REPL)
-  --agent            Enable AI agent mode
-  --prompt <text>    Single-shot agent prompt
-  --provider <name>  AI provider (claude, copilot)
-  -v                 Verbose agent output (shows SQL queries)
   --http [port]      Start HTTP REST server (default: 8080)
+  --mcp [port]       Start MCP server over SSE (default: random 9000-9999)
   --bind <addr>      Bind address for server (default: 127.0.0.1)
-  --token <token>    Auth token for HTTP/MCP mode
+  --token <token>    Auth token for HTTP server mode
   -h, --help         Show help
   --version          Show version
 
@@ -212,38 +207,19 @@ ORDER BY fi.path, f.line;
 - **Filter with `is_system = 0`** — without it, you'll get thousands of symbols from system headers.
 - **Ninja is recommended** over Makefiles for faster builds and better compile_commands.json support on all platforms.
 
-## AI Agent Mode
+## Using clangsql with an AI agent
 
-Query your codebase using natural language.
+clangsql is a plain SQL CLI — it does **not** embed or run its own AI agent. To let
+an external agent or LLM (Claude, Copilot, or any assistant) drive clangsql, point it
+at the tool two ways:
 
-### Prerequisites for AI Features
-
-The AI agent requires one of these CLI tools installed and authenticated:
-
-| Provider | CLI Tool | Install | Login |
-|----------|----------|---------|-------|
-| Claude (default) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | Run `claude`, then `/login` |
-| GitHub Copilot | [Copilot CLI](https://github.com/features/copilot/cli/) | `npm install -g @github/copilot` | Run `copilot`, then `/login` |
-
-**Important:** You must be logged in before using AI features.
-
-### Usage
-
-```bash
-# Interactive AI session
-clangsql main.cpp --agent -i
-
-# Single-shot prompt
-clangsql main.cpp --prompt "Find all virtual methods"
-
-# Verbose mode shows generated SQL
-clangsql main.cpp --agent -v -i
-
-# Choose provider (claude or copilot)
-clangsql main.cpp --agent --provider claude -i
-```
-
-The agent generates SQL queries based on your natural language questions and executes them against the parsed AST.
+- **As a system prompt:** feed [`prompts/clangsql_agent.md`](prompts/clangsql_agent.md)
+  to your model as its system/instruction prompt. It documents the full SQL schema,
+  every table and column, and worked query patterns, so the model can translate
+  natural-language questions into clangsql SQL and run them via `-e` / `--http` / `--mcp`.
+- **Over MCP:** start `clangsql file.cpp --mcp` and connect any MCP client (see the
+  [MCP Server](#mcp-server) section). The client's own model does the reasoning; clangsql
+  exposes the `clangsql_query` tool that executes SQL against the parsed AST.
 
 ## HTTP Server Mode
 
@@ -264,10 +240,6 @@ Start an HTTP server for REST-based querying:
 ```bash
 # Start HTTP server at launch
 clangsql main.cpp --http 8080
-
-# Or dynamically from the agent REPL
-clangsql main.cpp --agent -i
-clangsql> .http start
 ```
 
 ### Endpoints
@@ -300,35 +272,25 @@ All `/query` responses use the canonical script envelope — single statement = 
 
 Bodies can be multi-statement (semicolon-separated); each `results[i]` has its own `columns`/`rows`/`row_count`/`error`. Fail-fast is the default; pass `?continue_on_error=1` to run every statement regardless of earlier failures.
 
-### REPL Commands
-
-| Command | Description |
-|---------|-------------|
-| `.http` | Show status or start if not running |
-| `.http start` | Start HTTP server on random port |
-| `.http stop` | Stop HTTP server |
-| `.http help` | Show HTTP help |
-
 ## MCP Server
 
 Start an MCP (Model Context Protocol) server for integration with Claude Desktop and other MCP clients:
 
 ```bash
-# From the agent REPL
-clangsql main.cpp --agent -i
-clangsql> .mcp start
+# Start MCP server (random port 9000-9999, or pass an explicit port)
+clangsql main.cpp --mcp
+clangsql main.cpp --mcp 9123
 ```
 
 ### MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `clangsql_query` | Execute SQL query directly |
-| `clangsql_agent` | Ask natural language question (AI-powered) |
+| `clangsql_query` | Execute a SQL query directly against the parsed AST |
 
 ### Claude Desktop Integration
 
-Add to your Claude Desktop config:
+Add to your Claude Desktop config (the port is printed when the server starts):
 
 ```json
 {
@@ -339,15 +301,6 @@ Add to your Claude Desktop config:
   }
 }
 ```
-
-### REPL Commands
-
-| Command | Description |
-|---------|-------------|
-| `.mcp` | Show status or start if not running |
-| `.mcp start` | Start MCP server on random port |
-| `.mcp stop` | Stop MCP server |
-| `.mcp help` | Show MCP help |
 
 ## Example Queries
 
@@ -533,9 +486,17 @@ find_package(clangsql CONFIG REQUIRED)
 target_link_libraries(myapp PRIVATE clangsql::clangsql)
 ```
 
-## License
+## License and Terms of Use
 
-This project is licensed under the [Mozilla Public License 2.0](LICENSE).
+In short: you may read, build, evaluate, benchmark, package, and use unmodified clangsql, including commercially, if you preserve notices and follow the license terms. You may fork or patch it to prepare bug fixes, optimizations, features, tests, or documentation improvements for contribution back within the license's contribution-purpose rules.
+
+You may not maintain a divergent private fork, port, rebrand, clone, API-compatible replacement, competing implementation, or use clangsql as AI input to recreate or improve a derivative implementation without prior written permission from Elias Bachaalany. Independent implementations that are not copied from, materially derived from, or substantially informed by clangsql in the license's defined sense are not prohibited.
+
+Permission requests: open a GitHub issue at [0xeb/clangsql/issues](https://github.com/0xeb/clangsql/issues).
+
+If clangsql materially informs a distributed project, preserve the human origin: credit clangsql and Elias Bachaalany visibly in your README/docs and in About/credits UI when applicable. The license includes an examples/FAQ section for common allowed and permission-required uses. Third-party dependencies fetched at build time (libxsql, libclang/LLVM, and their transitive dependencies) remain under their own licenses.
+
+See the full [Human-Origin Source License v1.0](LICENSE).
 
 ## The xsql family
 

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /// @file main.cpp
 /// @brief clangsql CLI - SQL interface for Clang AST
@@ -13,8 +12,11 @@
 #include <clangsql/compile_commands.hpp>
 #include <clangsql/project.hpp>
 #include <xsql/query_script.hpp>
-#if defined(CLANGSQL_HAS_HTTP) && !defined(CLANGSQL_HAS_AI_AGENT)
+#ifdef CLANGSQL_HAS_HTTP
 #include "http_server.hpp"
+#endif
+#ifdef CLANGSQL_HAS_MCP
+#include "mcp_server.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -27,36 +29,9 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
-
-#ifdef CLANGSQL_HAS_AI_AGENT
-#include "ai_agent.hpp"
-#include "clangsql_commands.hpp"
-#include "mcp_server.hpp"
-#ifdef CLANGSQL_HAS_HTTP
-#include "http_server.hpp"
-#endif
+#if defined(CLANGSQL_HAS_HTTP) || defined(CLANGSQL_HAS_MCP)
 #include <csignal>
-#include <atomic>
-
-// Global agent pointer for signal handler
-static std::atomic<clangsql::AIAgent*> g_agent{nullptr};
-static std::atomic<bool> g_quit_requested{false};
-static std::unique_ptr<clangsql::ClangsqlMCPServer> g_mcp_server;
-static std::unique_ptr<clangsql::AIAgent> g_mcp_agent;
-#ifdef CLANGSQL_HAS_HTTP
-static std::unique_ptr<clangsql::ClangsqlHTTPServer> g_repl_http_server;
-#endif
-
-// Signal handler for Ctrl-C
-void signal_handler(int signum) {
-    if (signum == SIGINT) {
-        g_quit_requested.store(true);
-        auto* agent = g_agent.load();
-        if (agent) {
-            agent->request_quit();
-        }
-    }
-}
+#include <mutex>
 #endif
 
 /// Extract just the program name from a path (handles both / and \)
@@ -71,24 +46,25 @@ std::string program_name(const char* path) {
 
 void print_usage(const char* argv0) {
     std::string prog = program_name(argv0);
-    std::cerr << "Usage:\n"
+    std::cerr << "clangsql " << clangsql::VERSION << " - SQL interface to Clang ASTs\n"
+              << clangsql::COPYRIGHT << "\n\n"
+              << "Usage:\n"
               << "  " << prog << " <files...> [options] [clang-args...]\n"
               << "\n"
               << "Local Options:\n"
               << "  -s, --source <path>  Source file (alternative to positional)\n"
               << "  -e <sql>           Execute SQL query and exit\n"
               << "  -i                 Interactive mode (REPL)\n"
-#ifdef CLANGSQL_HAS_AI_AGENT
-              << "  --agent            Enable AI agent mode\n"
-              << "  --prompt <text>    Single-shot agent prompt\n"
-              << "  --provider <name>  AI provider (claude, copilot)\n"
-              << "  -v                 Verbose agent output\n"
-#endif
 #ifdef CLANGSQL_HAS_HTTP
               << "  --http [port]      Start HTTP REST server (default: 8080)\n"
+#endif
+#ifdef CLANGSQL_HAS_MCP
+              << "  --mcp [port]       Start MCP server over SSE (default: random 9000-9999)\n"
+#endif
+#if defined(CLANGSQL_HAS_HTTP) || defined(CLANGSQL_HAS_MCP)
               << "  --bind <addr>      Bind address for server (default: 127.0.0.1)\n"
 #endif
-              << "  --token <token>    Auth token for HTTP/MCP server mode\n"
+              << "  --token <token>    Auth token for HTTP server mode\n"
               << "  -h, --help         Show this help\n"
               << "  --version          Show version\n"
               << "\n"
@@ -122,11 +98,13 @@ void print_usage(const char* argv0) {
               << "\n"
               << "Examples:\n"
               << "  " << prog << " main.cpp -e \"SELECT name FROM functions\"\n"
-#ifdef CLANGSQL_HAS_AI_AGENT
-              << "  " << prog << " main.cpp --agent -i\n"
-              << "  " << prog << " main.cpp --prompt \"Find all virtual methods\"\n"
+#ifdef CLANGSQL_HAS_HTTP
+              << "  " << prog << " main.cpp --http 8080\n"
 #endif
-              << "  " << prog << " main.cpp --http 8080\n";
+#ifdef CLANGSQL_HAS_MCP
+              << "  " << prog << " main.cpp --mcp\n"
+#endif
+              ;
 }
 
 /// Check if argument looks like a source file
@@ -254,9 +232,8 @@ bool is_clangsql_option(const std::string& arg) {
            arg == "--cache" || arg == "--no-cache" ||
            arg == "--cache-dir" || arg == "--clear-cache" ||
            arg == "--cache-verbose" ||
-#ifdef CLANGSQL_HAS_AI_AGENT
-           arg == "--agent" || arg == "--prompt" ||
-           arg == "--provider" || arg == "-v" ||
+#ifdef CLANGSQL_HAS_MCP
+           arg == "--mcp" ||
 #endif
            false;
 }
@@ -354,6 +331,10 @@ std::string schema_from_path(const std::string& path) {
 // Forward declarations
 static std::string json_escape(const std::string& s);
 static std::string query_result_to_json(const xsql::Result& result);
+// Emit the results[] script envelope: the HTTP ?format=text|csv|tsv reformatter
+// only understands that shape (the flat query_result_to_json() renders empty there).
+static std::string session_query_to_script_json(clangsql::Session& session,
+                                                 const std::string& sql);
 
 /// Print result in tabular format
 void print_result(const xsql::Result& result) {
@@ -404,313 +385,11 @@ void print_result(const xsql::Result& result) {
     std::cout << "(" << result.size() << " row" << (result.size() != 1 ? "s" : "") << ")\n";
 }
 
-#ifdef CLANGSQL_HAS_AI_AGENT
-/// SQL executor for AI agent
-std::string execute_sql_for_agent(clangsql::Session& session, const std::string& sql) {
-    auto result = session.query(sql);
-    if (!result.ok()) {
-        return "Error: " + result.error;
-    }
-
-    if (result.empty()) {
-        return "(no rows)";
-    }
-
-    // Format as text table
-    std::ostringstream oss;
-
-    // Calculate column widths
-    std::vector<size_t> widths(result.columns.size());
-    for (size_t i = 0; i < result.columns.size(); ++i) {
-        widths[i] = result.columns[i].size();
-    }
-    for (const auto& row : result.rows) {
-        for (size_t i = 0; i < row.size() && i < widths.size(); ++i) {
-            widths[i] = (std::max)(widths[i], row[i].size());
-        }
-    }
-
-    // Print header
-    for (size_t i = 0; i < result.columns.size(); ++i) {
-        if (i > 0) oss << " | ";
-        oss << std::left << std::setw(static_cast<int>(widths[i])) << result.columns[i];
-    }
-    oss << "\n";
-
-    // Print separator
-    for (size_t i = 0; i < result.columns.size(); ++i) {
-        if (i > 0) oss << "-+-";
-        oss << std::string(widths[i], '-');
-    }
-    oss << "\n";
-
-    // Print rows
-    for (const auto& row : result.rows) {
-        for (size_t i = 0; i < row.size() && i < widths.size(); ++i) {
-            if (i > 0) oss << " | ";
-            oss << std::left << std::setw(static_cast<int>(widths[i])) << row[i];
-        }
-        oss << "\n";
-    }
-
-    oss << "(" << result.size() << " row" << (result.size() != 1 ? "s" : "") << ")";
-    return oss.str();
-}
-
-/// Run agent-enabled REPL
-void run_agent_repl(clangsql::Session& session, clangsql::AIAgent& agent) {
-    std::cout << "clangsql " << clangsql::VERSION << " - AI Agent Mode\n";
-    std::cout << "Type .help for help, .clear to reset, .quit to exit\n";
-    std::cout << "You can use natural language or SQL queries.\n\n";
-
-    // Install signal handler
-    g_agent.store(&agent);
-    std::signal(SIGINT, signal_handler);
-
-    std::string line;
-    std::string buffer;
-
-    while (!agent.quit_requested()) {
-        std::cout << (buffer.empty() ? "clangsql> " : "     ...> ");
-        std::cout.flush();
-
-        if (!std::getline(std::cin, line)) {
-            break;
-        }
-
-        // Handle dot commands
-        if (buffer.empty() && !line.empty() && line[0] == '.') {
-            clangsql::CommandCallbacks callbacks;
-            callbacks.get_tables = [&session]() {
-                auto result = session.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
-                std::ostringstream oss;
-                for (const auto& row : result.rows) {
-                    oss << "  " << row[0] << "\n";
-                }
-                return oss.str();
-            };
-            callbacks.get_schema = [&session](const std::string& table) {
-                auto result = session.query("PRAGMA table_info(" + table + ")");
-                if (!result.ok() || result.empty()) {
-                    return std::string("Table not found: " + table);
-                }
-                std::ostringstream oss;
-                oss << "CREATE TABLE " << table << " (\n";
-                for (size_t i = 0; i < result.rows.size(); ++i) {
-                    const auto& row = result.rows[i];
-                    oss << "  " << row[1] << " " << row[2];
-                    if (i + 1 < result.rows.size()) oss << ",";
-                    oss << "\n";
-                }
-                oss << ");";
-                return oss.str();
-            };
-            callbacks.clear_session = [&agent]() {
-                agent.reset_session();
-                return std::string("Agent session cleared");
-            };
-
-            // MCP server callbacks
-            callbacks.mcp_status = []() -> std::string {
-                if (g_mcp_server && g_mcp_server->is_running()) {
-                    return clangsql::format_mcp_status(g_mcp_server->port(), true);
-                } else {
-                    return "MCP server not running\nUse '.mcp start' to start\n";
-                }
-            };
-
-            callbacks.mcp_start = [&session, &agent]() -> std::string {
-                if (g_mcp_server && g_mcp_server->is_running()) {
-                    return clangsql::format_mcp_status(g_mcp_server->port(), true);
-                }
-
-                // Create MCP server if needed
-                if (!g_mcp_server) {
-                    g_mcp_server = std::make_unique<clangsql::ClangsqlMCPServer>();
-                }
-
-                // SQL executor - will be called on main thread via run_until_stopped()
-                clangsql::QueryCallback sql_cb = [&session](const std::string& sql) -> std::string {
-                    auto result = session.query(sql);
-                    return query_result_to_json(result);
-                };
-
-                // Create MCP agent for natural language queries
-                g_mcp_agent = std::make_unique<clangsql::AIAgent>(sql_cb);
-                g_mcp_agent->start();
-
-                clangsql::AskCallback ask_cb = [](const std::string& question) -> std::string {
-                    if (!g_mcp_agent) return "Error: AI agent not available";
-                    return g_mcp_agent->query(question);
-                };
-
-                // Start with use_queue=true for CLI mode (main thread execution)
-                int port = g_mcp_server->start(0, sql_cb, ask_cb, "127.0.0.1", true);
-                if (port <= 0) {
-                    g_mcp_agent.reset();
-                    return "Error: Failed to start MCP server\n";
-                }
-
-                // Print info
-                std::cout << clangsql::format_mcp_info(port, true);
-                std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
-                std::cout.flush();
-
-                // Install signal handler so Ctrl+C sets g_quit_requested
-                g_quit_requested.store(false);
-                auto old_handler = std::signal(SIGINT, signal_handler);
-#ifdef _WIN32
-                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
-#endif
-
-                // Set interrupt check to stop on Ctrl+C
-                g_mcp_server->set_interrupt_check([]() {
-                    return g_quit_requested.load();
-                });
-
-                // Enter wait loop - processes MCP commands on main thread
-                g_mcp_server->run_until_stopped();
-
-                // Restore previous signal handler
-                std::signal(SIGINT, old_handler);
-#ifdef _WIN32
-                std::signal(SIGBREAK, old_break_handler);
-#endif
-                g_mcp_agent.reset();
-                g_quit_requested.store(false);
-
-                return "MCP server stopped. Returning to REPL.\n";
-            };
-
-            callbacks.mcp_stop = []() -> std::string {
-                if (g_mcp_server && g_mcp_server->is_running()) {
-                    g_mcp_server->stop();
-                    g_mcp_agent.reset();
-                    return "MCP server stopped\n";
-                }
-                return "MCP server not running\n";
-            };
-
-#ifdef CLANGSQL_HAS_HTTP
-            // HTTP server callbacks
-            callbacks.http_status = []() -> std::string {
-                if (g_repl_http_server && g_repl_http_server->is_running()) {
-                    return clangsql::format_http_status(g_repl_http_server->port(), true);
-                }
-                return "HTTP server not running\nUse '.http start' to start\n";
-            };
-
-            callbacks.http_start = [&session]() -> std::string {
-                if (g_repl_http_server && g_repl_http_server->is_running()) {
-                    return clangsql::format_http_status(g_repl_http_server->port(), true);
-                }
-
-                // Create HTTP server if needed
-                if (!g_repl_http_server) {
-                    g_repl_http_server = std::make_unique<clangsql::ClangsqlHTTPServer>();
-                }
-
-                // SQL executor - called on main thread via run_until_stopped()
-                clangsql::HTTPQueryCallback sql_cb = [&session](const std::string& sql) -> std::string {
-                    auto result = session.query(sql);
-                    return query_result_to_json(result);
-                };
-
-                // Start with use_queue=true (CLI mode), port=0 (random 8100-8199)
-                int port = g_repl_http_server->start(0, sql_cb, "127.0.0.1", true);
-                if (port <= 0) {
-                    return "Error: Failed to start HTTP server\n";
-                }
-
-                // Print info
-                std::cout << clangsql::format_http_info(port);
-                std::cout.flush();
-
-                // Install signal handler so Ctrl+C sets g_quit_requested
-                g_quit_requested.store(false);
-                auto old_handler = std::signal(SIGINT, signal_handler);
-#ifdef _WIN32
-                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
-#endif
-
-                // Set interrupt check to stop on Ctrl+C
-                g_repl_http_server->set_interrupt_check([]() {
-                    return g_quit_requested.load();
-                });
-
-                // Enter wait loop - processes HTTP commands on main thread
-                g_repl_http_server->run_until_stopped();
-
-                // Restore previous signal handler
-                std::signal(SIGINT, old_handler);
-#ifdef _WIN32
-                std::signal(SIGBREAK, old_break_handler);
-#endif
-                g_quit_requested.store(false);
-
-                return "HTTP server stopped. Returning to REPL.\n";
-            };
-
-            callbacks.http_stop = []() -> std::string {
-                if (g_repl_http_server && g_repl_http_server->is_running()) {
-                    g_repl_http_server->stop();
-                    return "HTTP server stopped\n";
-                }
-                return "HTTP server not running\n";
-            };
-#endif
-
-            std::string output;
-            auto cmd_result = clangsql::handle_command(line, callbacks, output);
-
-            if (cmd_result == clangsql::CommandResult::QUIT) {
-                break;
-            } else if (cmd_result == clangsql::CommandResult::HANDLED) {
-                if (!output.empty()) {
-                    std::cout << output << "\n";
-                }
-                continue;
-            }
-        }
-
-        // Accumulate multi-line input
-        buffer += line + " ";
-
-        // Check if complete (ends with semicolon or looks like complete natural language)
-        size_t pos = buffer.find_last_not_of(" \t\n\r");
-        bool is_complete = false;
-
-        if (pos != std::string::npos) {
-            if (buffer[pos] == ';') {
-                is_complete = true;
-            } else if (!clangsql::AIAgent::looks_like_sql(buffer)) {
-                // Natural language - consider complete if we have a newline
-                is_complete = true;
-            }
-        }
-
-        if (is_complete) {
-            // Send to agent
-            std::string response = agent.query(buffer);
-            if (!response.empty()) {
-                std::cout << response << std::endl;
-            }
-            std::cout << "\n";
-            buffer.clear();
-        }
-    }
-
-    // Restore default signal handler
-    g_agent.store(nullptr);
-    std::signal(SIGINT, SIG_DFL);
-
-    std::cout << "\nGoodbye!\n";
-}
-#endif
 
 /// Run interactive REPL
 void run_repl(clangsql::Session& session) {
     std::cout << "clangsql " << clangsql::VERSION << " - Interactive Mode\n";
+    std::cout << clangsql::COPYRIGHT << "\n";
     std::cout << "Type .help for help, .clear to reset, .quit to exit\n\n";
 
     std::string line;
@@ -788,7 +467,10 @@ static clangsql::ClangsqlHTTPServer* g_http_server = nullptr;
 static void http_signal_handler(int) {
     if (g_http_server) g_http_server->stop();
 }
+#endif  // CLANGSQL_HAS_HTTP
 
+// JSON serialization helpers are shared by the HTTP and MCP server modes.
+#if defined(CLANGSQL_HAS_HTTP) || defined(CLANGSQL_HAS_MCP)
 static std::string json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 10);
@@ -831,7 +513,13 @@ static std::string query_result_to_json(const xsql::Result& result) {
             json << "[";
             for (size_t c = 0; c < result.rows[i].size(); c++) {
                 if (c > 0) json << ",";
-                json << "\"" << json_escape(result.rows[i][c]) << "\"";
+                // Honor the per-cell SQL-NULL flag: a real NULL serializes to JSON
+                // null (distinct from a genuine text value, incl. "" or "NULL").
+                if (result.rows[i].is_null(c)) {
+                    json << "null";
+                } else {
+                    json << "\"" << json_escape(result.rows[i][c]) << "\"";
+                }
             }
             json << "]";
         }
@@ -845,6 +533,31 @@ static std::string query_result_to_json(const xsql::Result& result) {
     return json.str();
 }
 
+// Run `sql` as a (possibly multi-statement) script and serialize it as the
+// canonical xsql envelope {success,statement_count,results:[...],...}. Carries
+// per-cell SQL-NULL fidelity so ?format=json and the text/csv/tsv reformatter
+// agree on NULLs. Shared by every HTTP query callback (REPL .http + --http).
+static std::string session_query_to_script_json(clangsql::Session& session,
+                                                 const std::string& sql) {
+    auto script = xsql::run_script(sql, {},
+        [&session](const std::string& stmt, xsql::ScriptStatementResult& out) {
+            auto r = session.query(stmt);
+            out.columns = r.columns;
+            out.rows.reserve(r.rows.size());
+            out.cell_null.reserve(r.rows.size());
+            for (const auto& row : r.rows) {
+                out.rows.push_back(row.values);
+                out.cell_null.push_back(row.nulls);   // carry SQL-NULL fidelity
+            }
+            out.elapsed_ms = static_cast<double>(r.elapsed_ms);
+            out.success = r.error.empty();
+            out.error = r.error;
+        });
+    return xsql::script_result_to_json(script);
+}
+#endif  // CLANGSQL_HAS_HTTP || CLANGSQL_HAS_MCP
+
+#ifdef CLANGSQL_HAS_HTTP
 static const char* CLANGSQL_HELP_TEXT = R"(CLANGSQL HTTP REST API
 ======================
 
@@ -903,19 +616,7 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
 
     auto query_cb = [&session, &query_mutex](const std::string& sql) -> std::string {
         std::lock_guard<std::mutex> lock(query_mutex);
-        auto script = xsql::run_script(sql, {},
-            [&session](const std::string& stmt, xsql::ScriptStatementResult& out) {
-                auto r = session.query(stmt);
-                out.columns = r.columns;
-                out.rows.reserve(r.rows.size());
-                for (const auto& row : r.rows) {
-                    out.rows.push_back(row.values);
-                }
-                out.elapsed_ms = static_cast<double>(r.elapsed_ms);
-                out.success = r.error.empty();
-                out.error = r.error;
-            });
-        return xsql::script_result_to_json(script);
+        return session_query_to_script_json(session, sql);
     };
 
     int actual_port = http_server.start(port, query_cb, actual_bind, false);
@@ -946,6 +647,59 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
 #endif // CLANGSQL_HAS_HTTP
 
 //=============================================================================
+// MCP Server Mode
+//=============================================================================
+
+#ifdef CLANGSQL_HAS_MCP
+static clangsql::ClangsqlMCPServer* g_mcp_mode_server = nullptr;
+
+static void mcp_signal_handler(int) {
+    if (g_mcp_mode_server) g_mcp_mode_server->stop();
+}
+
+// Serve the clangsql_query MCP tool over SSE until Ctrl+C. The server calls the
+// query callback on its own thread, so guard session access with a mutex.
+int run_mcp_mode(clangsql::Session& session, int port, const std::string& bind_addr) {
+    std::string actual_bind = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+
+    if (!actual_bind.empty() && actual_bind != "127.0.0.1" && actual_bind != "localhost") {
+        std::cerr << "WARNING: Binding MCP server to non-loopback address " << actual_bind << "\n";
+    }
+
+    std::mutex query_mutex;
+    clangsql::ClangsqlMCPServer mcp_server;
+
+    clangsql::QueryCallback query_cb = [&session, &query_mutex](const std::string& sql) -> std::string {
+        std::lock_guard<std::mutex> lock(query_mutex);
+        return session_query_to_script_json(session, sql);
+    };
+
+    int actual_port = mcp_server.start(port, query_cb, actual_bind, false);
+    if (actual_port <= 0) {
+        std::cerr << "Error: Failed to start MCP server\n";
+        return 1;
+    }
+
+    g_mcp_mode_server = &mcp_server;
+    auto old_handler = std::signal(SIGINT, mcp_signal_handler);
+
+    std::cout << clangsql::format_mcp_info(actual_port);
+    std::cout << "Press Ctrl+C to stop.\n\n";
+    std::cout.flush();
+
+    // Wait for server to stop (Ctrl+C)
+    while (mcp_server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    std::signal(SIGINT, old_handler);
+    g_mcp_mode_server = nullptr;
+    std::cout << "\nMCP server stopped.\n";
+    return 0;
+}
+#endif // CLANGSQL_HAS_MCP
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -964,6 +718,8 @@ int main(int argc, char* argv[]) {
     int http_port = 8080;
     bool interactive = false;
     bool http_mode = false;
+    bool mcp_mode = false;
+    int mcp_port = 0;  // 0 = random port in 9000-9999
     bool after_dashdash = false;
     std::string compile_commands_path;
     std::string build_dir_path;
@@ -979,13 +735,6 @@ int main(int argc, char* argv[]) {
     bool cache_verbose = false;
     bool clear_cache = false;
     std::string cache_dir_path;
-
-#ifdef CLANGSQL_HAS_AI_AGENT
-    bool agent_mode = false;
-    bool agent_verbose = false;
-    std::string agent_prompt;
-    std::string agent_provider;
-#endif
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -1009,6 +758,16 @@ int main(int argc, char* argv[]) {
                     http_port = std::stoi(argv[++i]);
                 } catch (...) {
                     std::cerr << "Invalid HTTP port number\n";
+                    return 1;
+                }
+            }
+        } else if (arg == "--mcp") {
+            mcp_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                try {
+                    mcp_port = std::stoi(argv[++i]);
+                } catch (...) {
+                    std::cerr << "Invalid MCP port number\n";
                     return 1;
                 }
             }
@@ -1042,19 +801,8 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 0;
         } else if (arg == "--version") {
-            std::cout << "clangsql " << clangsql::VERSION << "\n";
+            std::cout << "clangsql " << clangsql::VERSION << "\n" << clangsql::COPYRIGHT << "\n";
             return 0;
-#ifdef CLANGSQL_HAS_AI_AGENT
-        } else if (arg == "--agent") {
-            agent_mode = true;
-        } else if (arg == "--prompt" && i + 1 < argc) {
-            agent_prompt = argv[++i];
-            agent_mode = true;
-        } else if (arg == "--provider" && i + 1 < argc) {
-            agent_provider = argv[++i];
-        } else if (arg == "-v") {
-            agent_verbose = true;
-#endif
         } else if ((arg == "-s" || arg == "--source") && i + 1 < argc) {
             // Explicit source file option
             std::string src = argv[++i];
@@ -1281,47 +1029,14 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    //=========================================================================
-    // AI Agent Mode
-    //=========================================================================
-#ifdef CLANGSQL_HAS_AI_AGENT
-    if (agent_mode) {
-        // Load settings and apply provider override
-        auto settings = clangsql::LoadAgentSettings();
-        if (!agent_provider.empty()) {
-            try {
-                settings.default_provider = clangsql::ParseProviderType(agent_provider);
-            } catch (const std::exception& e) {
-                std::cerr << "Error: " << e.what() << "\n";
-                return 1;
-            }
-        }
-
-        // Create agent
-        auto executor = [&session](const std::string& sql) {
-            return execute_sql_for_agent(session, sql);
-        };
-        clangsql::AIAgent agent(executor, settings, agent_verbose);
-
-        // Start agent
-        agent.start();
-        if (!agent.is_available()) {
-            std::cerr << "Error: AI agent not available. Check your provider configuration.\n";
-            return 1;
-        }
-
-        // Single prompt mode
-        if (!agent_prompt.empty()) {
-            std::string result = agent.query(agent_prompt);
-            if (!result.empty()) {
-                printf("%s\n", result.c_str());
-            }
-            return 0;
-        }
-
-        // Interactive agent mode
-        run_agent_repl(session, agent);
-        return 0;
+#ifdef CLANGSQL_HAS_MCP
+    if (mcp_mode) {
+        return run_mcp_mode(session, mcp_port, bind_addr);
+    }
+#else
+    if (mcp_mode) {
+        std::cerr << "Error: MCP mode not available. Rebuild with -DCLANGSQL_WITH_MCP=ON\n";
+        return 1;
     }
 #endif
 

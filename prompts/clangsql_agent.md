@@ -41,6 +41,7 @@ Tables become prefixed: `a_functions`, `b_functions`. Use USR to correlate symbo
 clangsql main.cpp -e "SELECT name FROM functions"      # Single query
 clangsql main.cpp -i                                    # Interactive REPL
 clangsql main.cpp --http 8080                           # HTTP server mode
+clangsql main.cpp --mcp                                 # MCP server mode (SSE)
 clangsql main.cpp -- -std=c++17 -I./include            # Pass Clang flags
 ```
 
@@ -346,11 +347,14 @@ SELECT content FROM string_literals
 WHERE func_id = 0 AND method_id = 0 AND is_system = 0;
 ```
 
-## Aggregates (libxsql built-in)
+## Aggregates
 
 `blob_concat(value)` concatenates BLOB inputs and INTEGER 0-255 values
 into one BLOB. NULL inputs are skipped; TEXT or out-of-range INTs error.
 Use over an ordered row source.
+
+There are no custom views or extra scalar functions — query the 12 tables above
+directly, along with the standard SQLite built-ins.
 
 ## Common Queries
 
@@ -615,7 +619,9 @@ If a query returns unexpected results:
 
 ## Server Modes
 
-CLANGSQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+CLANGSQL supports two server protocols for remote queries: **HTTP REST** (recommended)
+and **MCP** (Model Context Protocol, over SSE). Both are started from the command line
+at launch (`--http` / `--mcp`); there is no in-REPL server control.
 
 ---
 
@@ -690,27 +696,25 @@ Bodies can be multi-statement (semicolon-separated); each `results[i]` has its o
 
 Start an MCP server for integration with Claude Desktop and other MCP clients.
 
-**Starting from the REPL:**
+**Starting the server:**
+```bash
+# Random port in 9000-9999, or pass an explicit port
+clangsql main.cpp --mcp
+clangsql main.cpp --mcp 9042
 ```
-clangsql> .mcp start
+```
 MCP server started on port 9042
 SSE endpoint: http://127.0.0.1:9042/sse
 
 Available tools:
   clangsql_query  - Execute SQL query directly
-  clangsql_agent  - Ask natural language question (AI-powered)
 ```
 
-**REPL Commands:**
+The MCP server exposes a single tool, `clangsql_query`, which runs SQL directly against
+the parsed AST. The connecting MCP client supplies its own model/reasoning; clangsql does
+not run an agent.
 
-| Command | Description |
-|---------|-------------|
-| `.mcp` | Show status or start if not running |
-| `.mcp start` | Start MCP server on random port |
-| `.mcp stop` | Stop MCP server |
-| `.mcp help` | Show MCP help |
-
-**Claude Desktop Configuration:**
+**Claude Desktop Configuration** (the port is printed when the server starts):
 ```json
 {
   "mcpServers": {
@@ -721,25 +725,4 @@ Available tools:
 }
 ```
 
----
-
-### Dynamic HTTP Server (from REPL)
-
-Start/stop the HTTP server dynamically from the agent REPL:
-
-```
-clangsql> .http start
-HTTP server started on port 8142
-URL: http://127.0.0.1:8142
-```
-
-**REPL Commands:**
-
-| Command | Description |
-|---------|-------------|
-| `.http` | Show status or start if not running |
-| `.http start` | Start HTTP server on random port |
-| `.http stop` | Stop HTTP server |
-| `.http help` | Show HTTP help |
-
-Press Ctrl+C to stop the server and return to the REPL.
+Press Ctrl+C to stop either server.
