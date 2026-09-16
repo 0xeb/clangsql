@@ -12,6 +12,7 @@
 #include <clangsql/compile_commands.hpp>
 #include <clangsql/project.hpp>
 #include <xsql/query_script.hpp>
+#include "../common/clangsql_commands.hpp"
 #ifdef CLANGSQL_HAS_HTTP
 #include "http_server.hpp"
 #endif
@@ -22,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <iomanip>
+#include <sstream>
 #include <thread>
 #include <regex>
 #include <set>
@@ -94,7 +96,7 @@ void print_usage(const char* argv0) {
               << "Tables (per schema):\n"
               << "  [schema_]files, [schema_]functions, [schema_]classes, [schema_]methods\n"
               << "  [schema_]fields, [schema_]variables, [schema_]parameters, [schema_]enums\n"
-              << "  [schema_]calls, [schema_]inheritance\n"
+              << "  [schema_]enum_values, [schema_]calls, [schema_]inheritance, [schema_]string_literals\n"
               << "\n"
               << "Examples:\n"
               << "  " << prog << " main.cpp -e \"SELECT name FROM functions\"\n"
@@ -392,6 +394,43 @@ void run_repl(clangsql::Session& session) {
     std::cout << clangsql::COPYRIGHT << "\n";
     std::cout << "Type .help for help, .clear to reset, .quit to exit\n\n";
 
+    // Route dot commands through the shared clangsql::handle_command dispatcher
+    // (also unit-tested in clangsql_commands_test.cpp) so the CLI and the module
+    // stay in lockstep. Server-control callbacks (.mcp/.http) are intentionally
+    // left unset: in interactive mode there is no live server (those are separate
+    // foreground modes), so they honestly report "not available".
+    clangsql::CommandCallbacks callbacks;
+    callbacks.get_tables = [&session]() {
+        auto result = session.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+        std::ostringstream os;
+        for (const auto& row : result.rows) os << "  " << row[0] << "\n";
+        return os.str();
+    };
+    callbacks.get_schema = [&session](const std::string& table) {
+        auto result = session.query("PRAGMA table_info(" + table + ")");
+        std::ostringstream os;
+        if (result.ok() && !result.empty()) {
+            os << "CREATE TABLE " << table << " (\n";
+            for (size_t i = 0; i < result.rows.size(); ++i) {
+                const auto& row = result.rows[i];
+                os << "  " << row[1] << " " << row[2];
+                if (i + 1 < result.rows.size()) os << ",";
+                os << "\n";
+            }
+            os << ");\n";
+        } else {
+            os << "Table not found: " << table << "\n";
+        }
+        return os.str();
+    };
+    callbacks.get_info = [&session]() {
+        std::ostringstream os;
+        os << "clangsql " << clangsql::VERSION << "\n";
+        os << "Attached translation units:\n";
+        for (const auto& schema : session.attached_schemas()) os << "  " << schema << "\n";
+        return os.str();
+    };
+
     std::string line;
     std::string buffer;
 
@@ -403,40 +442,21 @@ void run_repl(clangsql::Session& session) {
 
         // Handle dot commands
         if (buffer.empty() && !line.empty() && line[0] == '.') {
-            if (line == ".quit" || line == ".exit") {
-                break;
-            } else if (line == ".help") {
-                std::cout << "Commands:\n"
-                          << "  .tables       List all tables\n"
-                          << "  .schema <t>   Show table schema\n"
-                          << "  .attached     List attached TUs\n"
-                          << "  .quit         Exit\n";
-            } else if (line == ".tables") {
-                auto result = session.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
-                for (const auto& row : result.rows) {
-                    std::cout << "  " << row[0] << "\n";
-                }
-            } else if (line.substr(0, 8) == ".schema ") {
-                std::string table = line.substr(8);
-                auto result = session.query("PRAGMA table_info(" + table + ")");
-                if (result.ok() && !result.empty()) {
-                    std::cout << "CREATE TABLE " << table << " (\n";
-                    for (size_t i = 0; i < result.rows.size(); ++i) {
-                        const auto& row = result.rows[i];
-                        std::cout << "  " << row[1] << " " << row[2];
-                        if (i + 1 < result.rows.size()) std::cout << ",";
-                        std::cout << "\n";
-                    }
-                    std::cout << ");\n";
-                } else {
-                    std::cout << "Table not found: " << table << "\n";
-                }
-            } else if (line == ".attached") {
+            // .attached is CLI-specific (attached translation units), not part of
+            // the shared command module — handle it here before delegating.
+            if (line == ".attached") {
                 for (const auto& schema : session.attached_schemas()) {
                     std::cout << "  " << schema << "\n";
                 }
-            } else {
-                std::cout << "Unknown command: " << line << "\n";
+                continue;
+            }
+            std::string output;
+            auto cmd = clangsql::handle_command(line, callbacks, output);
+            if (cmd == clangsql::CommandResult::QUIT) {
+                break;
+            }
+            if (!output.empty()) {
+                std::cout << output << "\n";
             }
             continue;
         }
@@ -579,8 +599,10 @@ Tables (per schema):
   [schema_]variables   - Variables (global, local)
   [schema_]parameters  - Function parameters
   [schema_]enums       - Enumerations
+  [schema_]enum_values - Enumerator constants
   [schema_]calls       - Function call sites
   [schema_]inheritance - Class inheritance
+  [schema_]string_literals - String literals
 
 Example Queries:
   SELECT name, return_type FROM functions WHERE is_virtual = 1;

@@ -26,8 +26,4 @@ clangsql main.cpp handlers.cpp network.cpp utils.cpp -e "SELECT name FROM main_f
 
 # With compile_commands.json (auto-loads all files, prefixed tables)
 clangsql --compile-commands build/compile_commands.json -e "SELECT * FROM main_calls WHERE is_system = 0"
-
-# AI agent mode
-clangsql main.cpp handlers.cpp network.cpp utils.cpp --agent -i
-clangsql main.cpp --prompt "Find functions that handle network connections"
 ```

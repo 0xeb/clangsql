@@ -26,14 +26,14 @@ enum class CommandResult {
  *
  * These callbacks allow different environments (CLI, plugin) to extend
  * command behavior. For example, .clear might:
- *   - Core: Reset the AI agent session
+ *   - CLI: Reset the query session state
  *   - Plugin: Also clear the UI output window
  */
 struct CommandCallbacks {
     std::function<std::string()> get_tables;      // Return table list
     std::function<std::string(const std::string&)> get_schema;  // Return schema for table
     std::function<std::string()> get_info;        // Return database info
-    std::function<std::string()> clear_session;   // Clear/reset session (agent, UI, etc.)
+    std::function<std::string()> clear_session;   // Clear/reset session (session state, UI, etc.)
 
     // MCP server callbacks (optional)
     std::function<std::string()> mcp_status;      // Get MCP status
