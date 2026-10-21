@@ -18,7 +18,7 @@
 namespace clangsql {
 
 /// Library version
-constexpr const char* VERSION = "0.0.6";
+constexpr const char* VERSION = "0.0.7";
 
 /// Copyright / attribution line shown in CLI output
 constexpr const char* COPYRIGHT = "Copyright (c) 2024-2026 Elias Bachaalany";

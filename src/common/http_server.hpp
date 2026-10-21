@@ -35,9 +35,12 @@ public:
     ClangsqlHTTPServer(const ClangsqlHTTPServer&) = delete;
     ClangsqlHTTPServer& operator=(const ClangsqlHTTPServer&) = delete;
 
+    // A non-empty auth_token makes every route except GET / and GET /help
+    // require `Authorization: Bearer <token>` (or X-XSQL-Token).
     int start(int port, HTTPQueryCallback query_cb,
               const std::string& bind_addr = "127.0.0.1",
-              bool use_queue = false);
+              bool use_queue = false,
+              const std::string& auth_token = "");
 
     void run_until_stopped();
     void stop();

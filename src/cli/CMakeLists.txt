@@ -3,7 +3,14 @@
 set(CLI_SOURCES main.cpp)
 
 add_executable(clangsql_cli ${CLI_SOURCES})
-set_target_properties(clangsql_cli PROPERTIES OUTPUT_NAME clangsql)
+# Every executable gets an import library named after its output, here the
+# path of the static library it links (lib/clangsql.lib). The Visual Studio
+# generator then records that library as a link output and never relinks the
+# CLI after it changes, and an export would overwrite it. Name the import
+# library after the target instead.
+set_target_properties(clangsql_cli PROPERTIES
+    OUTPUT_NAME clangsql
+    ARCHIVE_OUTPUT_NAME clangsql_cli)
 
 # Windows VS_VERSION_INFO resource
 xsql_add_versioninfo(clangsql_cli

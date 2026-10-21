@@ -237,7 +237,7 @@ Host a parsed AST over HTTP for remote querying:
 clangsql main.cpp --http
 
 # Query from another terminal
-curl -X POST http://localhost:8080/query -d "SELECT name FROM functions"
+curl -X POST http://localhost:8080/query --data-binary "SELECT name FROM functions"
 ```
 
 ## HTTP REST API

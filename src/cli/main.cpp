@@ -395,7 +395,7 @@ void run_repl(clangsql::Session& session) {
     std::cout << "Type .help for help, .clear to reset, .quit to exit\n\n";
 
     // Route dot commands through the shared clangsql::handle_command dispatcher
-    // (also unit-tested in clangsql_commands_test.cpp) so the CLI and the module
+    // (also unit-tested on its own) so the CLI and the module
     // stay in lockstep. Server-control callbacks (.mcp/.http) are intentionally
     // left unset: in interactive mode there is no live server (those are separate
     // foreground modes), so they honestly report "not available".
@@ -619,7 +619,7 @@ Authentication (if enabled):
 
 Example:
   curl http://localhost:8080/help
-  curl -X POST http://localhost:8080/query -d "SELECT name FROM functions LIMIT 5"
+  curl -X POST http://localhost:8080/query --data-binary "SELECT name FROM functions LIMIT 5"
 )";
 
 int run_http_mode(clangsql::Session& session, int port, const std::string& bind_addr, const std::string& auth_token) {
@@ -641,7 +641,7 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
         return session_query_to_script_json(session, sql);
     };
 
-    int actual_port = http_server.start(port, query_cb, actual_bind, false);
+    int actual_port = http_server.start(port, query_cb, actual_bind, false, auth_token);
     if (actual_port <= 0) {
         std::cerr << "Error: Failed to start HTTP server on port " << port << "\n";
         return 1;
@@ -650,7 +650,8 @@ int run_http_mode(clangsql::Session& session, int port, const std::string& bind_
     g_http_server = &http_server;
     auto old_handler = std::signal(SIGINT, http_signal_handler);
 
-    std::cout << "HTTP server listening on http://" << actual_bind << ":" << actual_port << "\n";
+    std::cout << "HTTP server listening on http://"
+              << xsql::thinclient::format_url_host(actual_bind) << ":" << actual_port << "\n";
     std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
     std::cout << "Example: curl http://localhost:" << actual_port << "/help\n";
     std::cout << "Press Ctrl+C to stop.\n\n";
@@ -705,7 +706,7 @@ int run_mcp_mode(clangsql::Session& session, int port, const std::string& bind_a
     g_mcp_mode_server = &mcp_server;
     auto old_handler = std::signal(SIGINT, mcp_signal_handler);
 
-    std::cout << clangsql::format_mcp_info(actual_port);
+    std::cout << clangsql::format_mcp_info(actual_port, actual_bind);
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
 

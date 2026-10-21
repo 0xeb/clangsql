@@ -659,7 +659,7 @@ clangsql main.cpp --http 8080 --token mysecret
 curl http://localhost:8080/help
 
 # Execute SQL query
-curl -X POST http://localhost:8080/query -d "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
+curl -X POST http://localhost:8080/query --data-binary "SELECT name FROM functions WHERE is_system = 0 LIMIT 5"
 
 # With authentication
 curl -X POST http://localhost:8080/query \
